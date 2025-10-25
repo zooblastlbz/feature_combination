@@ -1,0 +1,90 @@
+# AdaFuseDiT 配置 - 大型本地 JSON 数据集（250万+样本）
+
+trainer:
+  cache_dir: "../.cache/torch_xla"
+  checkpoint_dir: "../output/512-AdaFuseDiT-LocalJSON"
+  checkpointing_steps: 5000
+  consolidation_steps: 50000
+  enable_gradient_checkpointing: false
+  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+  hard_skip_resume: false
+  logging_steps: 100
+  logit_mean: 0.0
+  logit_std: 1.0
+  max_steps: 500_000
+  mixed_precision: "bf16"
+  mode_scale: 1.29
+  precondition_outputs: false
+  project: "AdaFuseDiT"
+  resume_from: null
+  run: "512-AdaFuseDiT-LocalJSON"
+  seed: 42
+  train_dit: true
+  train_llm: false
+  weighting_scheme: "logit_normal"
+
+model:
+  attention: "self"
+  base: "google/gemma-2b"
+  dit_num_hidden_layers: 18
+  encoder_type: "llm"
+  name: "AdaFuseDiT"
+  patch_size: 2
+  pos_embed: "1d-rope"
+  qk_norm: true
+  sandwich_norm: false
+  timestep_conditioning: "adaln-zero"
+  
+  # AdaFuseDiT 特有配置
+  text_hidden_states_num: 4
+  use_timestep_adaptive_fusion: true
+  use_layer_wise_fusion: true
+  adaptive_fusion_time_embed_dim: 128
+
+ema:
+  decay: 0.99
+  update_steps: 100
+
+vae:
+  pretrained_model_name_or_path: "stabilityai/stable-diffusion-3-medium-diffusers"
+  subfolder: "vae"
+
+noise_scheduler:
+  pretrained_model_name_or_path: "stabilityai/stable-diffusion-3-medium-diffusers"
+  subfolder: "scheduler"
+
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-4
+
+lr_scheduler:
+  name: "constant"
+  num_warmup_steps: 0
+
+data:
+  # ===== 本地 JSON 数据集配置 =====
+  use_local_json: true
+  data_path: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/data/imagenet1k_512_sharegpt_vqa_t2i.json"
+  image_root: null  # 如果 JSON 中的路径是绝对路径，设为 null
+  
+  # JSON 键名配置
+  image_key: "image"  # JSON 中图像路径的键名
+  text_key: "text"    # JSON 中文本描述的键名
+  
+  # ===== 重要：大数据集优化配置 =====
+  streaming: true              # 启用流式加载（避免一次性加载 250 万样本到内存）
+  dataset_size: 2510688        # 手动指定数据集大小（流式模式需要）
+  
+  # 数据加载配置
+  batch_size: 16
+  dataloader_num_workers: 8    # 降低 worker 数量以减少内存占用
+  center_crop: true
+  resolution: 512
+  
+  # 文本处理配置
+  tokenizer: "google/gemma-2b"
+  max_prompt_length: 256
+  instruction: ""
+  apply_chat_template: false
+  random_dropping_rate: 0.1    # CFG 训练：10% 的概率丢弃 caption

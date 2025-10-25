@@ -29,6 +29,7 @@ import zstandard as zstd
 
 from .data import get_dataloader,llm_collate_fn
 from .models import build_model, get_llm, update_self_attention_mask
+from torch.utils.data import IterableDataset
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -670,7 +671,9 @@ class DeepSpeedTrainer(Trainer):
         self.lr_scheduler = get_scheduler(**self.hparams.lr_scheduler, optimizer=self.optimizer, num_training_steps=self.hparams.trainer.max_steps)
 
         self.dataset = get_dataloader(self.hparams)
-        #self.dataloader = iter(self.dataloader)
+        # 判定底层是否为 IterableDataset（如 WebDataset）。若是，则不将 training_data 交给 DeepSpeed
+        base_dataset = getattr(self.dataset, "dataset", self.dataset)
+        is_iterable = isinstance(base_dataset, IterableDataset)
 
         config = {
             "train_micro_batch_size_per_gpu": self.hparams.data.batch_size,
@@ -686,14 +689,31 @@ class DeepSpeedTrainer(Trainer):
             }
         }
 
-        self.model, self.optimizer, self.dataloader, self.lr_scheduler = deepspeed.initialize(
-            model=self.model,
-            optimizer=self.optimizer,
-            lr_scheduler=self.lr_scheduler,
-            config=config,
-            training_data=self.dataset,
-            collate_fn=llm_collate_fn if self.hparams.model.encoder_type in ["llm", "clip-llm"] else None,
-        )
+        if is_iterable:
+            # 仅初始化 engine，不让 DeepSpeed 构建 DataLoader
+            self.model, self.optimizer, _, self.lr_scheduler = deepspeed.initialize(
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                config=config,
+            )
+            self.dataloader = self.dataset
+        else:
+            # 让 DeepSpeed 基于底层 dataset 和原有 collate_fn 来构建分布式 DataLoader
+            training_data = base_dataset
+            collate_fn = getattr(self.dataset, "collate_fn", None)
+
+            self.model, self.optimizer, self.dataloader, self.lr_scheduler = deepspeed.initialize(
+                model=self.model,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                config=config,
+                training_data=training_data,
+                collate_fn=collate_fn,
+            )
+
+        # 训练循环使用 next(self.dataloader)，需将 DataLoader 转为迭代器
+        self.dataloader = iter(self.dataloader)
 
         self.load_checkpoint()
 

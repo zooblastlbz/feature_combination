@@ -2,6 +2,7 @@ from functools import partial
 import random
 import json
 from pathlib import Path
+import os
 
 from datasets import load_dataset
 from diffusers.utils import is_torch_xla_available
@@ -9,10 +10,23 @@ import numpy as np
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import CLIPTokenizer, GemmaTokenizer
 import webdataset as wds
+
+
+def _get_process_rank():
+    try:
+        if is_torch_xla_available():
+            import torch_xla.core.xla_model as xm
+            return int(xm.get_ordinal())
+        if dist.is_available() and dist.is_initialized():
+            return int(dist.get_rank())
+    except Exception:
+        pass
+    return int(os.environ.get("RANK", "0"))
 
 
 class LocalImageTextDataset(Dataset):
@@ -188,13 +202,17 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
         random.seed(worker_seed)
         np.random.seed(worker_seed)
     
+    # 使用独立的 Generator，并对不同 rank 偏移 seed，避免分布式下重复顺序
+    g = torch.Generator()
+    g.manual_seed(int(hparams.trainer.seed) + _get_process_rank())
+
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=hparams.data.batch_size,
         shuffle=True,  # 本地数据集需要手动 shuffle
         collate_fn=llm_collate_fn,
         num_workers=hparams.data.dataloader_num_workers,
-        generator=torch.manual_seed(hparams.trainer.seed),
+        generator=g,
         worker_init_fn=seed_worker,
         pin_memory=False if is_torch_xla_available() else True,
         drop_last=True,  # 丢弃最后不完整的 batch
@@ -291,9 +309,13 @@ def get_llm_dataloader(hparams, *args, **kwargs):
             max_length=hparams.data.max_prompt_length,
         ).input_ids.shape[1] - 1
 
+    # 使 shuffle 在不同进程使用不同 rng，避免重复
+    rank = _get_process_rank()
+    rng = random.Random(int(hparams.trainer.seed) + rank)
+
     dataset = (
         wds.WebDataset(wds.ResampledShards(hparams.data.data_path, deterministic=True))
-            .shuffle(1000, rng=random.Random(hparams.trainer.seed))
+            .shuffle(1000, rng=rng)
             .decode("pil")
             .map(
                 partial(
@@ -314,7 +336,7 @@ def get_llm_dataloader(hparams, *args, **kwargs):
         batch_size=hparams.data.batch_size,
         collate_fn=llm_collate_fn,
         num_workers=hparams.data.dataloader_num_workers,
-        generator=torch.manual_seed(hparams.trainer.seed),
+        generator=torch.manual_seed(int(hparams.trainer.seed) + rank),
         worker_init_fn=seed_worker,
         pin_memory=False if is_torch_xla_available() else True,
         prefetch_factor=8,
@@ -413,9 +435,12 @@ def get_clip_llm_dataloader(hparams, *args, **kwargs):
         max_length=hparams.data.max_prompt_length,
     ).input_ids.shape[1] - 1
 
+    rank = _get_process_rank()
+    rng = random.Random(int(hparams.trainer.seed) + rank)
+
     dataset = (
         wds.WebDataset(wds.ResampledShards(hparams.data.data_path, deterministic=True))
-            .shuffle(1000, rng=random.Random(hparams.trainer.seed))
+            .shuffle(1000, rng=rng)
             .decode("pil")
             .map(
                 partial(
@@ -437,7 +462,7 @@ def get_clip_llm_dataloader(hparams, *args, **kwargs):
         batch_size=hparams.data.batch_size,
         collate_fn=clip_llm_collate_fn,
         num_workers=hparams.data.dataloader_num_workers,
-        generator=torch.manual_seed(hparams.trainer.seed),
+        generator=torch.manual_seed(int(hparams.trainer.seed) + rank),
         worker_init_fn=seed_worker,
         pin_memory=False if is_torch_xla_available() else True,
         prefetch_factor=8,
