@@ -1,0 +1,79 @@
+trainer:
+  cache_dir: "../.cache/torch_xla"
+  checkpoint_dir: "../output/512-AdaFuseDiT-timewise"
+  checkpointing_steps: 1000
+  consolidation_steps: 50000
+  enable_gradient_checkpointing: false
+  gradient_accumulation_steps: 2
+  gradient_clipping: 1.0
+  hard_skip_resume: false
+  logging_steps: 100
+  logit_mean: 0.0
+  logit_std: 1.0
+  max_steps: 500_000
+  mixed_precision: "bf16"
+  mode_scale: 1.29
+  precondition_outputs: false
+  project: "AdaFuseDiT"
+  resume_from: null
+  run: "512-AdaFuseDiT-Mode4"
+  seed: 42
+  train_dit: true
+  train_llm: false
+  weighting_scheme: "logit_normal"
+
+model:
+  attention: "cross"
+  base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/gemma-2b"
+  dit_num_hidden_layers: 18
+  encoder_type: "llm"
+  name: "AdaFuseDiT"
+  patch_size: 2
+  pos_embed: "1d-rope"
+  qk_norm: true
+  sandwich_norm: false
+  timestep_conditioning: "addition"
+  
+  # === AdaFuseDiT 特有配置 ===
+  # 模式 4: 每层独立时间自适应权重（最灵活）
+  text_hidden_states_num: 4              # 使用最后 4 层文本特征
+  use_timestep_adaptive_fusion: true     # 启用时间自适应融合
+  use_layer_wise_fusion: false            # 每层独立融合
+  adaptive_fusion_time_embed_dim: 128    # 时间嵌入维度
+
+ema:
+  decay: 0.99
+  update_steps: 100
+
+vae:
+  pretrained_model_name_or_path: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/"
+  subfolder: "vae"
+
+noise_scheduler:
+  pretrained_model_name_or_path: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/scheduler/"
+  subfolder: "scheduler"
+
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-4
+
+lr_scheduler:
+  name: "constant"
+  num_warmup_steps: 0
+
+data:
+  apply_chat_template: false
+  batch_size: 4
+  center_crop: true
+  dataloader_num_workers: 8
+  data_path: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/data/imagenet1k_512_sharegpt_vqa_t2i.json"
+  use_local_json: true
+  device_prefetch_size: 8
+
+  instruction: ""
+  loader_prefetch_size: 8
+  max_prompt_length: 512
+  original_caption_rate: 0.0
+  random_dropping_rate: 0.1
+  resolution: 512
+  tokenizer: "/ytech_m2v5_hdd/workspace/kling_mm/Models/gemma-2b"
