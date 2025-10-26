@@ -167,21 +167,23 @@ def plot_weights(data, save_path: Optional[str] = None, title: Optional[str] = N
         return
 
     def _plot_one(ax, t_list, w_tensor, title_suffix: str = ""):
-        t = t_list
-        W = w_tensor.numpy()  # [N, K]
-        K = W.shape[1]
-        for k in range(K):
-            ax.plot(t, W[:, k], label=f"feature_{k}")
-        ax.set_xlabel("timestep")
+        # w_tensor: [N_timestep, K_layers]
+        W = w_tensor.numpy()
+        N, K = W.shape
+        x = list(range(K))
+        for i in range(N):
+            ax.plot(x, W[i, :], label=f"t={t_list[i]}")
+        ax.set_xlabel("layer index")
         ax.set_ylabel("weight")
         ax.set_ylim(0.0, 1.0)
+        ax.set_xticks(x)
         ax.grid(True, alpha=0.3)
         if title_suffix:
             ax.set_title(title_suffix)
         ax.legend(ncol=2, fontsize=8)
 
     if isinstance(data, dict) and all(isinstance(k, int) for k in data.keys()):
-        # per-layer：多子图
+        # per-layer：多子图（每个子图仍是“横轴层数、纵轴权重、每条线一个时间步”）
         L = len(data)
         import math
         cols = 3
@@ -256,10 +258,6 @@ def write_csv(data, csv_path: str):
 
 
 def main():
-
-
-
-    
     parser = argparse.ArgumentParser(description="Plot AdaFuseDiT fusion weights over timesteps")
 
     parser.add_argument("--config", default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/baseline.yaml", help="YAML 配置路径")
@@ -271,9 +269,10 @@ def main():
     parser.add_argument("--points", type=int, default=51, help="采样点数")
     parser.add_argument("--per_layer", action="store_true", help="若为层级融合，按层分别绘图")
     parser.add_argument("--save", type=str, default=None, help="输出图片路径（兼容参数，支持 .png/.svg 等）")
-    parser.add_argument("--save_svg", type=str, default="visual/layer_weights.csv", help="输出 SVG 路径（优先于 --save）")
+    parser.add_argument("--save_svg", type=str, default="visual/layer_weights.svg", help="输出 SVG 路径（优先于 --save）")
     parser.add_argument("--csv", type=str, default="visual/layer_weights.csv", help="将数值保存为 CSV。全局：直接指定 .csv 或目录；分层：指定目录，或指定文件前缀（将自动生成 *_layerX.csv）")
     args = parser.parse_args()
+    
 
     hparams = OmegaConf.load(args.config)
     model = build_model(hparams)
