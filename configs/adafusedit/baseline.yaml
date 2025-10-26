@@ -25,7 +25,7 @@ trainer:
 model:
   attention: "cross"
   base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/gemma-2b"
-  dit_num_hidden_layers: 18
+  dit_num_hidden_layers: 16
   encoder_type: "llm"
   name: "AdaFuseDiT"
   patch_size: 2
@@ -36,7 +36,7 @@ model:
   
   # === AdaFuseDiT 特有配置 ===
   # 模式 4: 每层独立时间自适应权重（最灵活）
-  text_hidden_states_num: 4              # 使用最后 4 层文本特征
+  text_hidden_states_num: 18              # 使用最后 4 层文本特征
   use_timestep_adaptive_fusion: true     # 启用时间自适应融合
   use_layer_wise_fusion: false            # 每层独立融合
   adaptive_fusion_time_embed_dim: 128    # 时间嵌入维度
