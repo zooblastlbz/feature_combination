@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Dict
 import torch
 import zstandard as zstd
 from omegaconf import OmegaConf
+import csv
 
 # --- 确保可从任意位置运行脚本 ---
 import sys
@@ -214,17 +215,64 @@ def plot_weights(data, save_path: Optional[str] = None, title: Optional[str] = N
             plt.show()
 
 
+def write_csv(data, csv_path: str):
+    os.makedirs(csv_path, exist_ok=True) if os.path.isdir(csv_path) else None
+
+    def _ensure_csv_path(path: str) -> str:
+        base, ext = os.path.splitext(path)
+        if ext.lower() != ".csv":
+            path = path + (".csv" if not ext else "")
+        return path
+
+    def _write_one(path: str, t_list, w_tensor):
+        path = _ensure_csv_path(path)
+        K = w_tensor.shape[1]
+        headers = ["timestep"] + [f"w{k}" for k in range(K)]
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            for i, t in enumerate(t_list):
+                row = [int(t)] + [float(x) for x in w_tensor[i].tolist()]
+                writer.writerow(row)
+        print(f"已保存CSV到 {path}")
+
+    if isinstance(data, dict) and all(isinstance(k, int) for k in data.keys()):
+        # 分层：多文件
+        if os.path.isdir(csv_path):
+            for li, pack in data.items():
+                _write_one(os.path.join(csv_path, f"weights_layer{li}.csv"), pack["t"], pack["w"])
+        else:
+            base, ext = os.path.splitext(csv_path)
+            if not ext:
+                ext = ".csv"
+            for li, pack in data.items():
+                _write_one(f"{base}_layer{li}{ext}", pack["t"], pack["w"])
+    else:
+        # 全局：单文件或目录/weights.csv
+        if os.path.isdir(csv_path):
+            _write_one(os.path.join(csv_path, "weights.csv"), data["t"], data["w"])
+        else:
+            _write_one(csv_path, data["t"], data["w"])
+
+
 def main():
+
+
+
+    
     parser = argparse.ArgumentParser(description="Plot AdaFuseDiT fusion weights over timesteps")
-    parser.add_argument("--config", required=True, help="YAML 配置路径")
-    parser.add_argument("--ckpt_dir", required=True, help="checkpoint 目录（包含 step 子目录与 latest 文件）")
+
+    parser.add_argument("--config", default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/baseline.yaml", help="YAML 配置路径")
+    parser.add_argument("--ckpt_dir", default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/output/512-AdaFuseDiT-timewise", help="checkpoint 目录（包含 step 子目录与 latest 文件）")
     parser.add_argument("--step", type=int, default=None, help="指定 step；缺省则自动寻找 latest")
     parser.add_argument("--ema", action="store_true", help="优先使用 EMA 权重（若存在）")
     parser.add_argument("--t_min", type=int, default=0)
     parser.add_argument("--t_max", type=int, default=1000)
     parser.add_argument("--points", type=int, default=51, help="采样点数")
     parser.add_argument("--per_layer", action="store_true", help="若为层级融合，按层分别绘图")
-    parser.add_argument("--save", type=str, default=None, help="输出 PNG 路径；不指定则直接展示")
+    parser.add_argument("--save", type=str, default=None, help="输出图片路径（兼容参数，支持 .png/.svg 等）")
+    parser.add_argument("--save_svg", type=str, default="visual/layer_weights.csv", help="输出 SVG 路径（优先于 --save）")
+    parser.add_argument("--csv", type=str, default="visual/layer_weights.csv", help="将数值保存为 CSV。全局：直接指定 .csv 或目录；分层：指定目录，或指定文件前缀（将自动生成 *_layerX.csv）")
     args = parser.parse_args()
 
     hparams = OmegaConf.load(args.config)
@@ -239,7 +287,11 @@ def main():
     else:
         title += " (global)"
 
-    plot_weights(data, args.save, title)
+    save_path = args.save_svg or args.save
+    plot_weights(data, save_path, title)
+
+    if args.csv:
+        write_csv(data, args.csv)
 
 
 if __name__ == "__main__":
