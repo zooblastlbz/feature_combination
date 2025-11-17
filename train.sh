@@ -20,9 +20,11 @@ HOSTFILE=/etc/mpi/hostfile
 
 NNODES=8
 NPROC_PER_NODE=8
+DEEPSPEED_CONFIG=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/zero2.json
 
 /ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc/bin/deepspeed \
   --hostfile ${HOSTFILE} \
   --num_nodes ${NNODES} \
   --num_gpus ${NPROC_PER_NODE} \
-    train.py -c configs/adafusedit/baseline.yaml 
+  --deepspeed ${DEEPSPEED_CONFIG} \
+    train.py -c /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/local_json_large.yaml
