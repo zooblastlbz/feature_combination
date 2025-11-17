@@ -22,9 +22,13 @@ NNODES=8
 NPROC_PER_NODE=8
 DEEPSPEED_CONFIG=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/zero2.json
 
+# 🔥 导出 DEEPSPEED_CONFIG 环境变量，让训练代码能够读取
+export DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG}
+
 /ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc/bin/deepspeed \
   --hostfile ${HOSTFILE} \
   --num_nodes ${NNODES} \
   --num_gpus ${NPROC_PER_NODE} \
-  --deepspeed ${DEEPSPEED_CONFIG} \
-    train.py -c /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/local_json_large.yaml
+    train.py \
+    -c /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/local_json_large.yaml \
+    --deepspeed_config ${DEEPSPEED_CONFIG}
