@@ -513,7 +513,7 @@ class SPMDTrainer(Trainer):
 
 
 class DeepSpeedTrainer(Trainer):
-    def __init__(self, hparams, local_rank):
+    def __init__(self, hparams, local_rank, deepspeed_config_path=None):
         self.hparams = hparams
 
         if self.hparams.trainer.seed is not None:
@@ -565,19 +565,59 @@ class DeepSpeedTrainer(Trainer):
         self.dataloader = get_dataloader(self.hparams)
         self.dataloader = iter(self.dataloader)
 
-        config = {
-            "train_micro_batch_size_per_gpu": self.hparams.data.batch_size,
-            "gradient_accumulation_steps": self.hparams.trainer.gradient_accumulation_steps,
-            "gradient_clipping": self.hparams.trainer.gradient_clipping,
-            "zero_allow_untested_optimizer": True,
-            "zero_optimization": {
-                "stage": 2,
-            },
-            "flops_profiler": {
-                "enabled": True,
-                "output_file": os.path.join(self.hparams.trainer.checkpoint_dir, "flops.txt"),
+        # 🔥 从命令行参数读取 DeepSpeed 配置
+        if deepspeed_config_path and os.path.exists(deepspeed_config_path):
+            # 如果指定了外部配置文件，则使用它
+            import json
+            with open(deepspeed_config_path, 'r') as f:
+                config = json.load(f)
+            
+            # 覆盖 "auto" 字段为实际值
+            if config.get("train_micro_batch_size_per_gpu") == "auto":
+                config["train_micro_batch_size_per_gpu"] = self.hparams.data.batch_size
+            if config.get("gradient_accumulation_steps") == "auto":
+                config["gradient_accumulation_steps"] = self.hparams.trainer.gradient_accumulation_steps
+            if config.get("gradient_clipping") == "auto":
+                config["gradient_clipping"] = self.hparams.trainer.gradient_clipping
+            
+            # 处理优化器参数
+            if "optimizer" in config and "params" in config["optimizer"]:
+                for key, value in config["optimizer"]["params"].items():
+                    if value == "auto":
+                        if key == "lr":
+                            config["optimizer"]["params"][key] = self.hparams.optimizer.lr
+                        elif key == "betas":
+                            config["optimizer"]["params"][key] = self.hparams.optimizer.betas if hasattr(self.hparams.optimizer, 'betas') else [0.9, 0.999]
+                        elif key == "eps":
+                            config["optimizer"]["params"][key] = self.hparams.optimizer.eps if hasattr(self.hparams.optimizer, 'eps') else 1e-8
+                        elif key == "weight_decay":
+                            config["optimizer"]["params"][key] = self.hparams.optimizer.weight_decay
+            
+            # 处理混合精度
+            if "bf16" in config and config["bf16"].get("enabled") == "auto":
+                config["bf16"]["enabled"] = (self.hparams.trainer.mixed_precision == "bf16")
+            
+            if dist.get_rank() == 0:
+                print(f"✅ 使用 DeepSpeed 配置文件: {deepspeed_config_path}")
+                print(f"📋 配置内容: {json.dumps(config, indent=2)}")
+        else:
+            # 使用默认配置（向后兼容）
+            config = {
+                "train_micro_batch_size_per_gpu": self.hparams.data.batch_size,
+                "gradient_accumulation_steps": self.hparams.trainer.gradient_accumulation_steps,
+                "gradient_clipping": self.hparams.trainer.gradient_clipping,
+                "zero_allow_untested_optimizer": True,
+                "zero_optimization": {
+                    "stage": 2,
+                },
+                "flops_profiler": {
+                    "enabled": True,
+                    "output_file": os.path.join(self.hparams.trainer.checkpoint_dir, "flops.txt"),
+                }
             }
-        }
+            if dist.get_rank() == 0:
+                print("⚠️ 未指定 DeepSpeed 配置文件，使用默认配置")
+        
         self.model, self.optimizer, _, self.lr_scheduler = deepspeed.initialize(
             model=self.model,
             optimizer=self.optimizer,
@@ -652,10 +692,10 @@ class DeepSpeedTrainer(Trainer):
         pass
 
 
-def get_trainer(hparams, local_rank):
+def get_trainer(hparams, local_rank, deepspeed_config_path=None):
     if ACCEL == "xla":
         return SPMDTrainer(hparams)
     elif ACCEL == "cuda":
-        return DeepSpeedTrainer(hparams, local_rank)
+        return DeepSpeedTrainer(hparams, local_rank, deepspeed_config_path)
     else:
         raise NotImplementedError
