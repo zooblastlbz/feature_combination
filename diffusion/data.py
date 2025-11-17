@@ -29,6 +29,32 @@ def _get_process_rank():
     return int(os.environ.get("RANK", "0"))
 
 
+class InfiniteDataLoader:
+    """
+    无限循环的 DataLoader 包装器
+    用于支持多 epoch 训练，当一个 epoch 结束后自动开始下一个 epoch
+    """
+    def __init__(self, dataloader):
+        self.dataloader = dataloader
+        self.iterator = None
+        
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.iterator is None:
+            self.iterator = iter(self.dataloader)
+        
+        try:
+            batch = next(self.iterator)
+            return batch
+        except StopIteration:
+            # 一个 epoch 结束，重新开始
+            self.iterator = iter(self.dataloader)
+            batch = next(self.iterator)
+            return batch
+
+
 class LocalImageTextDataset(Dataset):
     """
     本地 JSON 格式数据集加载器（使用 HuggingFace datasets）
@@ -206,7 +232,7 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
     g = torch.Generator()
     g.manual_seed(int(hparams.trainer.seed) + _get_process_rank())
 
-    return torch.utils.data.DataLoader(
+    dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=hparams.data.batch_size,
         shuffle=True,  # 本地数据集需要手动 shuffle
@@ -217,6 +243,10 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
         pin_memory=False if is_torch_xla_available() else True,
         drop_last=True,  # 丢弃最后不完整的 batch
     )
+    
+    # 🔥 关键修复：包装成无限循环的 DataLoader
+    print("✅ 使用 InfiniteDataLoader 包装，支持多 epoch 训练")
+    return InfiniteDataLoader(dataloader)
 
 
 def llm_preprocess_fn(hparams, tokenizer, sample):

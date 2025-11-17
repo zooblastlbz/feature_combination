@@ -5,7 +5,6 @@ from io import BytesIO
 import os
 import random
 import shutil
-
 from tqdm import tqdm
 
 from diffusers import (
@@ -25,11 +24,8 @@ import torch.distributed as dist
 from transformers import CLIPTextModelWithProjection
 import zstandard as zstd
 
-
-
-from .data import get_dataloader,llm_collate_fn
+from .data import get_dataloader
 from .models import build_model, get_llm, update_self_attention_mask
-from torch.utils.data import IterableDataset
 
 if is_torch_xla_available():
     import torch_xla.core.xla_model as xm
@@ -210,93 +206,6 @@ class Trainer(ABC):
 
         return loss
 
-    def adafusedit_training_step(self, batch):
-        """
-        AdaFuseDiT 训练步骤，支持多层文本特征提取和自适应融合。
-        """
-        pixel_values = batch["pixel_values"]
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"].to(self.device)
-
-        # 提取多层文本特征
-        llm_attention_mask = update_self_attention_mask(attention_mask, 0, False, self.device, torch.float32 if ACCEL == "xla" else self.llm.dtype)
-        position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
-
-        # 获取所有隐藏层
-        llm_output = self.llm(
-            input_ids.to(self.device),
-            llm_attention_mask,
-            position_ids,
-            use_cache=False,
-            output_hidden_states=True,
-            return_dict=False,
-        )
-        all_hidden_states = llm_output[1]  # tuple of hidden states
-        
-        # 根据配置提取需要的层数
-        text_hidden_states_num = self.hparams.model.text_hidden_states_num
-        
-        if text_hidden_states_num > 1:
-            # 提取最后 N 层作为 list
-            text_hidden_states = [
-                all_hidden_states[-(text_hidden_states_num - i)].to(dtype=pixel_values.dtype)
-                for i in range(text_hidden_states_num)
-            ]
-        else:
-            # 单层模式（向后兼容）
-            text_hidden_states = all_hidden_states[self.hparams.model.text_hidden_states_index].to(dtype=pixel_values.dtype)
-
-        # Convert images to latent space
-        model_input = pixel_values.to(self.device)
-        model_input = self.vae.encode(model_input).latent_dist.sample()
-        model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-
-        # Sample noise that we'll add to the latents
-        noise = torch.randn_like(model_input).to(self.device)
-        bsz = model_input.shape[0]
-
-        # Sample a random timestep for each image
-        u = compute_density_for_timestep_sampling(
-            weighting_scheme=self.hparams.trainer.weighting_scheme,
-            batch_size=bsz,
-            logit_mean=self.hparams.trainer.logit_mean,
-            logit_std=self.hparams.trainer.logit_std,
-            mode_scale=self.hparams.trainer.mode_scale,
-        )
-        indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
-        timesteps = self.noise_scheduler.timesteps[indices]
-
-        # Add noise according to flow matching
-        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
-        noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-
-        # Predict the noise residual (传入多层文本特征)
-        model_pred = self.model(
-            hidden_states=noisy_model_input,
-            timestep=timesteps.to(self.device),
-            text_hidden_states=text_hidden_states,  # list or single tensor
-            attention_mask=attention_mask,
-        )
-
-        # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
-        if self.hparams.trainer.precondition_outputs:
-            model_pred = model_pred * (-sigmas) + noisy_model_input
-
-        # Weighting schemes
-        weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
-
-        # Flow matching loss
-        if self.hparams.trainer.precondition_outputs:
-            target = model_input
-        else:
-            target = noise - model_input
-
-        # Compute loss
-        loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
-        loss = loss.mean()
-
-        return loss
-
     def fusedit_training_step(self, batch):
         pixel_values = batch["pixel_values"]
         input_ids = batch["input_ids"]
@@ -465,15 +374,6 @@ class SPMDTrainer(Trainer):
             else:
                 raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
             self.training_step = self.dit_training_step
-        elif self.hparams.model.name == "AdaFuseDiT":
-            if self.hparams.model.encoder_type == "llm":
-                self.llm = get_llm(self.hparams.model.base, self.model.config.base_config)
-                self.llm.requires_grad_(False)
-                self.llm = SpmdFullyShardedDataParallel(self.llm)
-                self.llm = apply_xla_patch_to_nn_linear(self.llm, xs.xla_patched_nn_linear_forward)
-            else:
-                raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
-            self.training_step = self.adafusedit_training_step
         elif self.hparams.model.name == "FuseDiT":
             if self.hparams.model.encoder_type == "clip-llm":
                 self.clip = CLIPTextModelWithProjection.from_pretrained(**self.hparams.clip_l)
@@ -648,14 +548,6 @@ class DeepSpeedTrainer(Trainer):
             else:
                 raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
             self.training_step = self.dit_training_step
-        elif self.hparams.model.name == "AdaFuseDiT":
-            if self.hparams.model.encoder_type == "llm":
-                self.llm = get_llm(self.hparams.model.base, self.model.config.base_config)
-                self.llm.requires_grad_(False)
-                self.llm.to(self.device)
-            else:
-                raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
-            self.training_step = self.adafusedit_training_step
         elif self.hparams.model.name == "FuseDiT":
             if self.hparams.model.encoder_type == "clip-llm":
                 self.clip = CLIPTextModelWithProjection.from_pretrained(**self.hparams.clip_l)
@@ -670,10 +562,8 @@ class DeepSpeedTrainer(Trainer):
         self.optimizer = torch.optim.AdamW(self.model.trainable_parameters(), **self.hparams.optimizer)
         self.lr_scheduler = get_scheduler(**self.hparams.lr_scheduler, optimizer=self.optimizer, num_training_steps=self.hparams.trainer.max_steps)
 
-        self.dataset = get_dataloader(self.hparams)
-        # 判定底层是否为 IterableDataset（如 WebDataset）。若是，则不将 training_data 交给 DeepSpeed
-        base_dataset = getattr(self.dataset, "dataset", self.dataset)
-        is_iterable = isinstance(base_dataset, IterableDataset)
+        self.dataloader = get_dataloader(self.hparams)
+        self.dataloader = iter(self.dataloader)
 
         config = {
             "train_micro_batch_size_per_gpu": self.hparams.data.batch_size,
@@ -688,32 +578,12 @@ class DeepSpeedTrainer(Trainer):
                 "output_file": os.path.join(self.hparams.trainer.checkpoint_dir, "flops.txt"),
             }
         }
-
-        if is_iterable:
-            # 仅初始化 engine，不让 DeepSpeed 构建 DataLoader
-            self.model, self.optimizer, _, self.lr_scheduler = deepspeed.initialize(
-                model=self.model,
-                optimizer=self.optimizer,
-                lr_scheduler=self.lr_scheduler,
-                config=config,
-            )
-            self.dataloader = self.dataset
-        else:
-            # 让 DeepSpeed 基于底层 dataset 和原有 collate_fn 来构建分布式 DataLoader
-            training_data = base_dataset
-            collate_fn = getattr(self.dataset, "collate_fn", None)
-
-            self.model, self.optimizer, self.dataloader, self.lr_scheduler = deepspeed.initialize(
-                model=self.model,
-                optimizer=self.optimizer,
-                lr_scheduler=self.lr_scheduler,
-                config=config,
-                training_data=training_data,
-                collate_fn=collate_fn,
-            )
-
-        # 训练循环使用 next(self.dataloader)，需将 DataLoader 转为迭代器
-        self.dataloader = iter(self.dataloader)
+        self.model, self.optimizer, _, self.lr_scheduler = deepspeed.initialize(
+            model=self.model,
+            optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
+            config=config,
+        )
 
         self.load_checkpoint()
 
