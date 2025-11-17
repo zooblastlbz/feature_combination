@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset
 from torchvision import transforms
-from transformers import CLIPTokenizer, GemmaTokenizer
+from transformers import CLIPTokenizer, AutoTokenizer
 import webdataset as wds
 
 
@@ -166,7 +166,7 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
       image_root: "path/to/images"          # 可选，图像根目录
       use_local_json: true                  # 启用本地 JSON 加载
     """
-    tokenizer = GemmaTokenizer.from_pretrained(hparams.data.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer)
     
     # 计算 instruction 长度
     if hasattr(hparams.data, 'apply_chat_template') and hparams.data.apply_chat_template:
@@ -288,7 +288,7 @@ def llm_collate_fn(examples):
 
 
 def get_llm_dataloader(hparams, *args, **kwargs):
-    tokenizer = GemmaTokenizer.from_pretrained(hparams.data.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer)
 
     if hparams.data.apply_chat_template:
         hparams.data.instruction_length = tokenizer.apply_chat_template(
@@ -425,7 +425,7 @@ def clip_llm_collate_fn(examples):
 
 def get_clip_llm_dataloader(hparams, *args, **kwargs):
     clip_tokenizer = CLIPTokenizer.from_pretrained(**hparams.data.tokenizer.clip)
-    tokenizer = GemmaTokenizer.from_pretrained(hparams.data.tokenizer.llm)
+    tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer.llm)
 
     hparams.data.instruction_length = tokenizer(
         hparams.data.instruction.rstrip(),

@@ -19,6 +19,7 @@ from transformers import (
     PaliGemmaConfig,
     PaliGemmaForConditionalGeneration,
     PretrainedConfig,
+    AutoModelForImageTextToText
 )
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_utils import PreTrainedModel
@@ -144,7 +145,25 @@ def get_llm(model: str, base_config: PretrainedConfig):
     elif isinstance(base_config, PaliGemmaConfig):
         return PaliGemmaForConditionalGeneration.from_pretrained(model).language_model.model
     else:
-        raise ValueError(f"Unknown model: {model}")
+        # Fallbacks to support more encoder families, e.g., Qwen/Qwen-VL
+        # 1) Try pure causal LM first
+        try:
+            from transformers import AutoModelForCausalLM
+            lm = AutoModelForCausalLM.from_pretrained(model)
+            return lm.model if hasattr(lm, "model") else lm
+        except Exception:
+            pass
+        # 2) Try vision-language models and extract the language sub-module
+        try:
+            from transformers import AutoModelForImageTextToText
+            vl = AutoModelForImageTextToText.from_pretrained(model)
+            for attr in ["language_model", "text_model", "model"]:
+                if hasattr(vl, attr):
+                    lm = getattr(vl, attr)
+                    return lm.model if hasattr(lm, "model") else lm
+            return vl
+        except Exception as e:
+            raise ValueError(f"Unknown model: {model}") from e
 
 
 def update_self_attention_mask(llm_attention_mask: torch.LongTensor, dit_sequence_length: int, use_cache: bool, device, dtype):
@@ -196,6 +215,32 @@ def unpatchify(dit_hidden_states: torch.FloatTensor, height: int, width: int, pa
     )
 
     return output
+
+
+def _patch_base_config_defaults(base_config):
+    """填充缺失字段以兼容非 Gemma 家族（如 Qwen/Qwen-VL）。"""
+    # head_dim
+    if not hasattr(base_config, "head_dim") and hasattr(base_config, "hidden_size") and hasattr(base_config, "num_attention_heads"):
+        base_config.head_dim = base_config.hidden_size // base_config.num_attention_heads
+    # KV heads
+    if not hasattr(base_config, "num_key_value_heads") and hasattr(base_config, "num_attention_heads"):
+        base_config.num_key_value_heads = base_config.num_attention_heads
+    # attention bias
+    if not hasattr(base_config, "attention_bias"):
+        base_config.attention_bias = False
+    # rms norm eps
+    if not hasattr(base_config, "rms_norm_eps"):
+        base_config.rms_norm_eps = 1e-6
+    # max position embeddings
+    if not hasattr(base_config, "max_position_embeddings"):
+        base_config.max_position_embeddings = 32768 if hasattr(base_config, "rope_theta") else 2048
+    # rope theta
+    if not hasattr(base_config, "rope_theta"):
+        base_config.rope_theta = 10000.0
+    # initializer range
+    if not hasattr(base_config, "initializer_range"):
+        base_config.initializer_range = 0.02
+    return base_config
 
 
 class DiT(PreTrainedModel):
@@ -1325,6 +1370,7 @@ def build_fusedit(hparams):
     base_config = AutoConfig.from_pretrained(hparams.model.base)
     load_model = get_llm(hparams.model.base, base_config)
     base_config = load_model.config
+    base_config = _patch_base_config_defaults(base_config)
 
     assert hparams.model.attention in ["self", "cross"]
     assert hparams.model.pos_embed in ["ape", "1d-rope", "2d-rope", "m-rope"]
@@ -1368,6 +1414,7 @@ def build_dit(hparams):
     base_config = AutoConfig.from_pretrained(hparams.model.base)
     load_model = get_llm(hparams.model.base, base_config)
     base_config = load_model.config
+    base_config = _patch_base_config_defaults(base_config)
     del load_model
 
     assert hparams.model.pos_embed in ["ape", "1d-rope", "2d-rope", "m-rope"]
@@ -1401,6 +1448,7 @@ def build_adafusedit(hparams):
     base_config = AutoConfig.from_pretrained(hparams.model.base)
     load_model = get_llm(hparams.model.base, base_config)
     base_config = load_model.config
+    base_config = _patch_base_config_defaults(base_config)
     del load_model
 
     assert hparams.model.pos_embed in ["ape", "1d-rope", "2d-rope", "m-rope"]
