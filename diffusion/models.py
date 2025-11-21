@@ -269,17 +269,9 @@ class DiT(PreTrainedModel):
             pos_embed_max_size=config.pos_embed_max_size,
         )
 
-        self.rotary_emb = GemmaRotaryEmbedding(
-            config.base_config.head_dim,
-            config.base_config.max_position_embeddings,
-            config.base_config.rope_theta,
-        )
+        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
         if config.pos_embed == "2d-rope":
-            self.rotary_emb_half = GemmaRotaryEmbedding(
-                config.base_config.head_dim // 2,
-                config.base_config.max_position_embeddings,
-                config.base_config.rope_theta,
-            )
+            raise NotImplementedError("2d-rope is not implemented yet.")
         
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -514,17 +506,10 @@ class AdaFuseDiT(PreTrainedModel):
             pos_embed_max_size=config.pos_embed_max_size,
         )
 
-        self.rotary_emb = GemmaRotaryEmbedding(
-            config.base_config.head_dim,
-            config.base_config.max_position_embeddings,
-            config.base_config.rope_theta,
-        )
+
+        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
         if config.pos_embed == "2d-rope":
-            self.rotary_emb_half = GemmaRotaryEmbedding(
-                config.base_config.head_dim // 2,
-                config.base_config.max_position_embeddings,
-                config.base_config.rope_theta,
-            )
+            raise NotImplementedError("2d-rope is not implemented yet.")
         
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)

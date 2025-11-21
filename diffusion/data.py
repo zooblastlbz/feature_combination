@@ -72,6 +72,11 @@ class LocalImageTextDataset(Dataset):
     - 自动缓存和内存映射
     - 支持流式加载大型数据集
     - 更好的性能和内存管理
+    
+    错误处理策略：
+    - 重试加载失败的图像
+    - 如果失败，随机选择替代样本
+    - 最终 fallback 使用灰色占位符图像
     """
     def __init__(self, json_path, hparams, tokenizer, image_root=None):
         """
@@ -89,6 +94,10 @@ class LocalImageTextDataset(Dataset):
         self.image_key = getattr(hparams.data, 'image_key', 'image')
         self.text_key = getattr(hparams.data, 'text_key', 'text')
         
+        # 🔥 错误处理配置
+        self.max_load_attempts = getattr(hparams.data, 'max_load_attempts', 5)
+        self.log_errors = getattr(hparams.data, 'log_image_errors', True)
+        
         # 使用 datasets 加载 JSON 数据
         print(f"📚 正在使用 datasets 库加载 {json_path}...")
         self.dataset = load_dataset('json', data_files=json_path, split='train')
@@ -96,6 +105,7 @@ class LocalImageTextDataset(Dataset):
         print(f"✅ 成功加载 {len(self.dataset)} 个样本从 {json_path}")
         print(f"📌 使用键名: image_key='{self.image_key}', text_key='{self.text_key}'")
         print(f"📊 数据集特征: {self.dataset.column_names}")
+        print(f"🛡️ 错误处理: 最大尝试次数={self.max_load_attempts}, 记录错误={self.log_errors}")
         
         # 验证数据集是否包含指定的键
         if self.image_key not in self.dataset.column_names:
@@ -109,6 +119,17 @@ class LocalImageTextDataset(Dataset):
                 f"可用的键: {self.dataset.column_names}"
             )
         
+        # 错误日志
+        if self.log_errors:
+            log_dir = Path(hparams.trainer.checkpoint_dir) / "data_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self.error_log_path = log_dir / f"corrupted_images_rank_{_get_process_rank()}.txt"
+            print(f"📝 错误日志: {self.error_log_path}")
+        else:
+            self.error_log_path = None
+        
+        self.error_count = 0
+        
         # 图像预处理变换
         self.transform = transforms.Compose([
             transforms.Resize(hparams.data.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
@@ -121,21 +142,121 @@ class LocalImageTextDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
     
-    def __getitem__(self, idx):
-        # 使用 datasets 获取样本
-        item = self.dataset[idx]
+    def _load_image_robust(self, image_path):
+        """
+        鲁棒的图像加载方法
         
-        # 使用配置的键名加载图像
-        image_path = item[self.image_key]
-        if self.image_root:
-            image_path = self.image_root / image_path
+        Args:
+            image_path: 图像路径
+        
+        Returns:
+            PIL.Image 或 None（如果加载失败）
+        """
+        try:
+            # 检查文件是否存在
+            if not Path(image_path).exists():
+                return None, f"文件不存在: {image_path}"
+            
+            # 尝试打开图像
+            image = Image.open(image_path)
+            
+            # 验证图像是否损坏（尝试加载数据）
+            image.load()
+            
+            # 转换为 RGB
+            image = image.convert('RGB')
+            
+            return image, None
+            
+        except Exception as e:
+            return None, str(e)
+    
+    def _log_error(self, idx, image_path, error_msg):
+        """记录错误到日志文件"""
+        if not self.log_errors or self.error_log_path is None:
+            return
         
         try:
-            image = Image.open(image_path).convert('RGB')
-        except Exception as e:
-            print(f"⚠️ 无法加载图像 {image_path}: {e}")
-            # 返回一个纯黑图像作为占位符
-            image = Image.new('RGB', (self.hparams.data.resolution, self.hparams.data.resolution), (0, 0, 0))
+            with open(self.error_log_path, 'a') as f:
+                f.write(f"{idx}\t{image_path}\t{error_msg}\n")
+        except Exception:
+            pass  # 日志写入失败不影响训练
+    
+    def _create_placeholder_image(self):
+        """创建灰色占位符图像（比黑色更好）"""
+        # 使用中性灰色 (128, 128, 128) 而不是纯黑 (0, 0, 0)
+        # 这样对训练的负面影响更小
+        return Image.new(
+            'RGB', 
+            (self.hparams.data.resolution, self.hparams.data.resolution), 
+            (128, 128, 128)
+        )
+    
+    def __getitem__(self, idx):
+        original_idx = idx
+        image = None
+        item = None
+        
+        # 🔥 方案1：重试 + 随机替代
+        for attempt in range(self.max_load_attempts):
+            try:
+                # 使用 datasets 获取样本
+                item = self.dataset[idx]
+                
+                # 使用配置的键名加载图像
+                image_path = item[self.image_key]
+                if self.image_root:
+                    image_path = self.image_root / image_path
+                else:
+                    image_path = Path(image_path)
+                
+                # 尝试加载图像
+                image, error = self._load_image_robust(image_path)
+                
+                if image is not None:
+                    # 成功加载，跳出循环
+                    break
+                else:
+                    # 加载失败
+                    self.error_count += 1
+                    
+                    # 记录错误（仅第一次尝试时记录原始索引）
+                    if attempt == 0:
+                        self._log_error(original_idx, str(image_path), error)
+                    
+                    if attempt < self.max_load_attempts - 1:
+                        # 还有重试机会，随机选择另一个样本
+                        idx = random.randint(0, len(self.dataset) - 1)
+                        if attempt == 0:  # 只在第一次失败时打印
+                            print(f"⚠️ [{self.error_count}] 无法加载图像 {image_path}: {error}")
+                            print(f"   ↳ 尝试替代样本 idx={idx}（第 {attempt + 1}/{self.max_load_attempts - 1} 次重试）")
+                    else:
+                        # 所有尝试都失败，使用占位符
+                        print(f"   ↳ 所有尝试失败，使用灰色占位符图像")
+                        image = self._create_placeholder_image()
+                        # 使用原始样本的文本
+                        item = self.dataset[original_idx]
+                        break
+                        
+            except Exception as e:
+                # 其他未预期的错误
+                self.error_count += 1
+                print(f"❌ 处理样本 {idx} 时发生未预期错误: {e}")
+                
+                if attempt < self.max_load_attempts - 1:
+                    # 随机选择另一个样本
+                    idx = random.randint(0, len(self.dataset) - 1)
+                else:
+                    # 最后的 fallback
+                    image = self._create_placeholder_image()
+                    item = self.dataset[original_idx]
+                    break
+        
+        # 如果最终还是没有图像（不应该发生，但作为保险）
+        if image is None:
+            print(f"⚠️ 样本 {original_idx} 最终未能加载，使用灰色占位符")
+            image = self._create_placeholder_image()
+            item = self.dataset[original_idx]
         
         # 应用图像变换
         pixel_values = self.transform(image)
