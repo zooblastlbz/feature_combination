@@ -1,6 +1,7 @@
 from typing import List, Optional, Union
 
 from transformers import (
+    AutoConfig,
     GemmaConfig,
     Gemma2Config,
     PretrainedConfig
@@ -45,7 +46,10 @@ class DiTConfig(PretrainedConfig):
             elif base_config["model_type"] == "gemma2":
                 base_config = Gemma2Config.from_dict(base_config)
             else:
-                raise ValueError(f"Model type {base_config['model_type']} not supported.")
+                try:
+                    base_config = AutoConfig.from_dict(base_config)
+                except Exception:
+                    raise ValueError(f"Model type {base_config['model_type']} not supported.")
 
         self.attention = attention
         self.base_config = base_config
