@@ -9,7 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 import torch
 
-from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP
+from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
 def load_pipeline(model_type: str, ckpt_path: str):
@@ -19,6 +19,8 @@ def load_pipeline(model_type: str, ckpt_path: str):
         pipeline = FuseDiTPipeline.from_pretrained(ckpt_path).to("cuda")
     elif model_type == "fuse-dit-clip":
         pipeline = FuseDiTPipelineWithCLIP.from_pretrained(ckpt_path).to("cuda")
+    elif model_type == "adafusedit":
+        pipeline = AdaFuseDiTPipeline.from_pretrained(ckpt_path).to("cuda")
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     pipeline.set_progress_bar_config(disable=True)
