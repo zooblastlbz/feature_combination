@@ -11,7 +11,7 @@ from tqdm import tqdm
 from accelerate import PartialState
 from lightning import seed_everything
 
-from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP
+from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
 def sample(args, data_dict):
@@ -25,6 +25,8 @@ def sample(args, data_dict):
         pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
     elif args.model_type == "fuse-dit-clip":
         pipeline = FuseDiTPipelineWithCLIP.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
+    elif args.model_type == "adafusedit":
+        pipeline = AdaFuseDiTPipeline.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
     pipeline.set_progress_bar_config(disable=True)

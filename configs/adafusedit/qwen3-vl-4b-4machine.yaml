@@ -1,34 +1,79 @@
-#!/bin/bash
-set -x
+trainer:
+  cache_dir: "../.cache/torch_xla"
+  checkpoint_dir: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise"
+  checkpointing_steps: 5000
+  consolidation_steps: 50000
+  enable_gradient_checkpointing: false
+  gradient_accumulation_steps: 4
+  gradient_clipping: 1.0
+  hard_skip_resume: false
+  logging_steps: 1
+  logit_mean: 0.0
+  logit_std: 1.0
+  max_steps: 500_000
+  mixed_precision: "bf16"
+  mode_scale: 1.29
+  precondition_outputs: false
+  project: "AdaFuseDiT"
+  resume_from: null
+  run: "256-AdaFuseDiT-time-wise"
+  seed: 42
+  train_dit: true
+  train_llm: false
+  weighting_scheme: "logit_normal"
 
-export OMPI_ALLOW_RUN_AS_ROOT=1
-export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
-mpirun --hostfile /etc/mpi/hostfile --pernode -x PATH sh -c 'rm -f /dev/shm/nccl-*'
+model:
+  attention: "cross"
+  base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/"
+  dit_num_hidden_layers: 18
+  encoder_type: "llm"
+  name: "AdaFuseDiT"
+  patch_size: 2
+  pos_embed: "1d-rope"
+  qk_norm: true
+  sandwich_norm: false
+  timestep_conditioning: "addition"
+  
+  # === AdaFuseDiT 特有配置 ===
+  # 模式 4: 每层独立时间自适应权重（最灵活）
+  text_hidden_states_num: 36             # 使用最后 4 层文本特征
+  use_timestep_adaptive_fusion: true     # 启用时间自适应融合
+  use_layer_wise_fusion: false            # 每层独立融合
+  adaptive_fusion_time_embed_dim: 128    # 时间嵌入维度
 
+ema:
+  decay: 0.99
+  update_steps: 100
 
-export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
-# 针对8机64卡配置调整slots
-#num_slots=8  # 每个节点8张卡
-#sed -i "s/slots=[0-9]\+\$/slots=$num_slots/g" /etc/mpi/hostfile
+vae:
+  pretrained_model_name_or_path: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/"
+  subfolder: "vae"
 
-# NCCL网络和调试配置
-rm .deepspeed_env
-cp /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/env_a800 /root/.deepspeed_env
+noise_scheduler:
+  pretrained_model_name_or_path: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/scheduler/"
+  subfolder: "scheduler"
 
+optimizer:
+  lr: 1e-4
+  weight_decay: 1e-4
 
-HOSTFILE=/etc/mpi/hostfile
+lr_scheduler:
+  name: "constant"
+  num_warmup_steps: 0
 
-NNODES=4
-NPROC_PER_NODE=8
-DEEPSPEED_CONFIG=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/zero2.json
+data:
+  apply_chat_template: false
+  batch_size: 4
+  center_crop: true
+  dataloader_num_workers: 8
+  data_path: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/train_data/t2i_train_data_six_filtered.json"
+  use_local_json: true
+  device_prefetch_size: 8
 
-# 🔥 导出 DEEPSPEED_CONFIG 环境变量，让训练代码能够读取
-export DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG}
-
-/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin/deepspeed \
-  --hostfile ${HOSTFILE} \
-  --num_nodes ${NNODES} \
-  --num_gpus ${NPROC_PER_NODE} \
-    train.py \
-    -c /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-4machine.yaml \
-    --deepspeed_config ${DEEPSPEED_CONFIG}
+  instruction: ""
+  loader_prefetch_size: 8
+  max_prompt_length: 512
+  original_caption_rate: 0.0
+  random_dropping_rate: 0.1
+  resolution: 256
+  tokenizer: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/"
