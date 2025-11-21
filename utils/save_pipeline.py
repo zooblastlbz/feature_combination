@@ -12,13 +12,23 @@ import torch
 from transformers import CLIPTokenizer, GemmaTokenizer, AutoModel, CLIPTextModelWithProjection
 
 from diffusion.configs import DiTConfig, FuseDiTConfig
-from diffusion.models import DiT, FuseDiT
-from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP
+from diffusion.models import DiT, FuseDiT, AdaFuseDiT
+from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
 def main(args):
     if args.trainer == "deepspeed":
-        state_dict = get_fp32_state_dict_from_zero_checkpoint(args.checkpoint)
+        checkpoint_dir = args.checkpoint
+        tag = args.tag
+        
+        if tag is None:
+            latest_path = os.path.join(checkpoint_dir, 'latest')
+            if not os.path.isfile(latest_path):
+                # If 'latest' file is missing, assume checkpoint_dir is the full path to the specific checkpoint
+                # We need to split it because get_fp32_state_dict_from_zero_checkpoint expects (base, tag)
+                checkpoint_dir, tag = os.path.split(checkpoint_dir.rstrip(os.sep))
+
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag)
     elif args.trainer == "spmd":
         if args.compression:
             with open(f"{args.checkpoint}/model.pt.zst", "rb") as f:
@@ -43,11 +53,23 @@ def main(args):
         config = FuseDiTConfig.from_pretrained(args.checkpoint)
         transformer = FuseDiT(config)
         transformer.load_state_dict(state_dict)
+    elif args.type == "adafusedit":
+        config = DiTConfig.from_pretrained(args.checkpoint)
+        transformer = AdaFuseDiT(config)
+        transformer.load_state_dict(state_dict)
 
     tokenizer = GemmaTokenizer.from_pretrained(config.base_config._name_or_path)
 
     if args.type == "baseline-dit":
         pipeline = DiTPipeline(
+            transformer=transformer,
+            scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
+            vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
+            tokenizer=tokenizer,
+            llm=AutoModel.from_pretrained(config.base_config._name_or_path),
+        )
+    elif args.type == "adafusedit":
+        pipeline = AdaFuseDiTPipeline(
             transformer=transformer,
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
@@ -79,6 +101,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="./output")
+    parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--trainer", type=str, default="deepspeed")
     parser.add_argument("--type", type=str, default="fuse-dit")
     parser.add_argument("--scheduler", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
