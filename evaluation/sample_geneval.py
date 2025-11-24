@@ -17,15 +17,15 @@ import json
 from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
-def load_pipeline(model_type: str, ckpt_path: str):
+def load_pipeline(model_type: str, ckpt_path: str, dtype):
     if model_type == "baseline-dit":
-        pipeline = DiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = DiTPipeline.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
     elif model_type == "fuse-dit":
-        pipeline = FuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = FuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
     elif model_type == "fuse-dit-clip":
-        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
     elif model_type == "adafusedit":
-        pipeline = AdaFuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = AdaFuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     pipeline.set_progress_bar_config(disable=True)
@@ -37,10 +37,20 @@ def generate(opt):
     with open(opt.gen.metadata_file) as fp:
         metadatas = [json.loads(line) for line in fp]
     
+    dtype_str = opt.pipeline.get("dtype", "bf16")
+    if dtype_str == "bf16":
+        torch_dtype = torch.bfloat16
+    elif dtype_str == "fp16":
+        torch_dtype = torch.float16
+    elif dtype_str == "fp32":
+        torch_dtype = torch.float32
+    else:
+        raise ValueError(f"Unknown dtype: {dtype_str}")
+
     distributed_state = PartialState()
     with distributed_state.split_between_processes(list(enumerate(metadatas))) as samples:
         for model in tqdm(opt.pipeline.ckpt_path):
-            pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"))
+            pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
             for index, metadata in tqdm(samples):
                 outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}", f"{index:0>5}")
                 os.makedirs(outpath, exist_ok=True)
@@ -58,7 +68,7 @@ def generate(opt):
                 for _ in range((opt.gen.n_samples + batch_size - 1) // batch_size):
                     # Generate images
                     generator = torch.manual_seed(opt.gen.seed)
-                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                    with torch.autocast("cuda", dtype=torch_dtype):
                         images = pipe(
                             prompt=prompt,
                             height=opt.gen.H,
