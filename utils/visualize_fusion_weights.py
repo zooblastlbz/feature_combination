@@ -138,7 +138,7 @@ def visualize(args):
         np.savetxt(csv_path, data_to_save, delimiter=",", header=header, comments="", fmt="%.6f")
         print(f"Saved weights to {csv_path}")
 
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(30, 18))
         # weights: (T, N)
         num_text_layers = weights.shape[1]
         x = np.arange(num_text_layers)
@@ -155,7 +155,7 @@ def visualize(args):
         plt.xticks(x) # Ensure integer ticks for layers
         plt.tight_layout()
         
-        filename = f"fusion_weights_{key}.png"
+        filename = f"fusion_weights_{key}.pdf"
         save_path = os.path.join(args.output_dir, filename)
         plt.savefig(save_path)
         plt.close()
@@ -163,9 +163,9 @@ def visualize(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize AdaFuseDiT fusion weights")
-    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/25000", help="Path to the checkpoint (file or folder)")
+    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/115000", help="Path to the checkpoint (file or folder)")
     parser.add_argument("--config", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-4machine.yaml", help="Path to the model config file (.yaml)")
-    parser.add_argument("--output_dir", type=str, default="visual/fusion_plots", help="Directory to save plots")
+    parser.add_argument("--output_dir", type=str, default="visual/fusion_plots_115000", help="Directory to save plots")
     parser.add_argument("--num_timesteps", type=int, default=10, help="Number of timestep curves to plot")
     
     args = parser.parse_args()

@@ -9,10 +9,10 @@ import zstandard as zstd
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 import torch
-from transformers import CLIPTokenizer, GemmaTokenizer, AutoModel, CLIPTextModelWithProjection
+from transformers import AutoTokenizer, CLIPTokenizer, GemmaTokenizer, AutoModel, CLIPTextModelWithProjection, AutoConfig
 
 from diffusion.configs import DiTConfig, FuseDiTConfig
-from diffusion.models import DiT, FuseDiT, AdaFuseDiT
+from diffusion.models import DiT, FuseDiT, AdaFuseDiT, get_llm
 from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
@@ -58,7 +58,37 @@ def main(args):
         transformer = AdaFuseDiT(config)
         transformer.load_state_dict(state_dict)
 
-    tokenizer = GemmaTokenizer.from_pretrained(config.base_config._name_or_path)
+    # Determine tokenizer/LLM path
+    model_path = args.llm_path
+    if model_path is None:
+        model_path = config.base_config._name_or_path
+    
+    # Handle case where path is empty or invalid
+    if not model_path:
+        print("Warning: `_name_or_path` in config is empty and `--llm_path` was not provided.")
+        print("Please provide the path to the LLM/Tokenizer using `--llm_path`.")
+        # We can't proceed reliably without a path, but let's try to let the user know.
+        # If we continue, from_pretrained('') will fail.
+    
+    print(f"Loading tokenizer and LLM from: {model_path}")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as e:
+        print(f"Failed to load AutoTokenizer from {model_path}: {e}")
+        print("Falling back to GemmaTokenizer...")
+        tokenizer = GemmaTokenizer.from_pretrained(model_path)
+
+    # Load LLM using the same logic as training
+    if args.type in ["baseline-dit", "adafusedit"]:
+        # Ensure base_config is a Config object for get_llm checks
+        if isinstance(config.base_config, dict):
+            base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        else:
+            base_config = config.base_config
+        
+        llm = get_llm(model_path, base_config)
+    else:
+        llm = None
 
     if args.type == "baseline-dit":
         pipeline = DiTPipeline(
@@ -66,7 +96,7 @@ def main(args):
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=AutoModel.from_pretrained(config.base_config._name_or_path),
+            llm=llm,
         )
     elif args.type == "adafusedit":
         pipeline = AdaFuseDiTPipeline(
@@ -74,7 +104,7 @@ def main(args):
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=AutoModel.from_pretrained(config.base_config._name_or_path),
+            llm=llm,
         )
     elif args.type == "fuse-dit":
         pipeline = FuseDiTPipeline(
@@ -109,6 +139,7 @@ if __name__ == "__main__":
     parser.add_argument("--clip_l", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--clip_g", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--t5", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
+    parser.add_argument("--llm_path", type=str, default=None, help="Path to the LLM/Tokenizer")
     parser.add_argument("--compression", action="store_true")
     args = parser.parse_args()
     main(args)

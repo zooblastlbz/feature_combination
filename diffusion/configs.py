@@ -49,7 +49,7 @@ class DiTConfig(PretrainedConfig):
                 try:
                     base_config = AutoConfig.from_dict(base_config)
                 except Exception:
-                    raise ValueError(f"Model type {base_config['model_type']} not supported.")
+                    base_config = PretrainedConfig.from_dict(base_config)
 
         self.attention = attention
         self.base_config = base_config
