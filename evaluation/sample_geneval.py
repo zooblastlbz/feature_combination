@@ -19,13 +19,13 @@ from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWit
 
 def load_pipeline(model_type: str, ckpt_path: str):
     if model_type == "baseline-dit":
-        pipeline = DiTPipeline.from_pretrained(ckpt_path).to("cuda")
+        pipeline = DiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
     elif model_type == "fuse-dit":
-        pipeline = FuseDiTPipeline.from_pretrained(ckpt_path).to("cuda")
+        pipeline = FuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
     elif model_type == "fuse-dit-clip":
-        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(ckpt_path).to("cuda")
+        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
     elif model_type == "adafusedit":
-        pipeline = AdaFuseDiTPipeline.from_pretrained(ckpt_path).to("cuda")
+        pipeline = AdaFuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16).to("cuda")
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     pipeline.set_progress_bar_config(disable=True)
@@ -58,7 +58,7 @@ def generate(opt):
                 for _ in range((opt.gen.n_samples + batch_size - 1) // batch_size):
                     # Generate images
                     generator = torch.manual_seed(opt.gen.seed)
-                    with torch.autocast("cuda"):
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
                         images = pipe(
                             prompt=prompt,
                             height=opt.gen.H,

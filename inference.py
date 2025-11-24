@@ -3,21 +3,23 @@ import argparse
 from lightning import seed_everything
 
 from diffusion.pipelines import FuseDiTPipeline
+import torch
 
 
 def main(args):
     seed_everything(args.seed)
 
-    pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint).to("cuda")
+    pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
 
-    image = pipeline(
-        args.prompt,
-        width=args.resolution,
-        height=args.resolution,
-        num_inference_steps=args.num_inference_steps,
-        guidance_scale=args.guidance_scale,
-        use_cache=True,
-    )[0][0]
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        image = pipeline(
+            args.prompt,
+            width=args.resolution,
+            height=args.resolution,
+            num_inference_steps=args.num_inference_steps,
+            guidance_scale=args.guidance_scale,
+            use_cache=True,
+        )[0][0]
     image.save(args.save_path)
 
 

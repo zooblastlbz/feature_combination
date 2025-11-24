@@ -5,3 +5,4 @@ python utils/save_pipeline.py \
     --vae /ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/vae \
     --scheduler /ytech_m2v5_hdd/workspace/kling_mm/Models/Lumina-Image-2.0/scheduler/ \
     --tag 35000 \
+    --llm_path /ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/ \

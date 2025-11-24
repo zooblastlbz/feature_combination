@@ -20,25 +20,23 @@ def sample(args, data_dict):
 
     distributed_state = PartialState()
     if args.model_type == "baseline-dit":
-        pipeline = DiTPipeline.from_pretrained(args.checkpoint).to("cuda")
+        pipeline = DiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
     elif args.model_type == "fuse-dit":
-        pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
+        pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
     elif args.model_type == "fuse-dit-clip":
-        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
+        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
     elif args.model_type == "adafusedit":
-        pipeline = AdaFuseDiTPipeline.from_pretrained(args.checkpoint).to("cuda", dtype=torch.bfloat16)
+        pipeline = AdaFuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
     pipeline.set_progress_bar_config(disable=True)
-
-    
 
     with distributed_state.split_between_processes(list(data_dict.items())[:args.num_samples]) as samples:
         samples = [tuple(zip(*samples[i:i + args.batch_size])) for i in range(0, len(samples), args.batch_size)]
         for file_names, info in tqdm(samples):
             categories = [sample["category"] for sample in info]
             captions = [sample["prompt"] for sample in info]
-            with torch.autocast("cuda"):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 images = pipeline(
                     captions,
                     width=args.resolution,
