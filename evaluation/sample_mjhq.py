@@ -18,15 +18,24 @@ def sample(args, data_dict):
     seed_everything(args.seed)
     os.makedirs(args.save_dir, exist_ok=True)
 
+    if args.dtype == "bf16":
+        torch_dtype = torch.bfloat16
+    elif args.dtype == "fp16":
+        torch_dtype = torch.float16
+    elif args.dtype == "fp32":
+        torch_dtype = torch.float32
+    else:
+        raise ValueError(f"Unknown dtype: {args.dtype}")
+
     distributed_state = PartialState()
     if args.model_type == "baseline-dit":
-        pipeline = DiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = DiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
     elif args.model_type == "fuse-dit":
-        pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
     elif args.model_type == "fuse-dit-clip":
-        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = FuseDiTPipelineWithCLIP.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
     elif args.model_type == "adafusedit":
-        pipeline = AdaFuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
+        pipeline = AdaFuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
     pipeline.set_progress_bar_config(disable=True)
@@ -36,7 +45,7 @@ def sample(args, data_dict):
         for file_names, info in tqdm(samples):
             categories = [sample["category"] for sample in info]
             captions = [sample["prompt"] for sample in info]
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast("cuda", dtype=torch_dtype):
                 images = pipeline(
                     captions,
                     width=args.resolution,
@@ -69,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--save_dir", type=str, default="/data/bingda/ckpts/large-scale-800k/mjhq-6")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     args = parser.parse_args()
 
     main(args)

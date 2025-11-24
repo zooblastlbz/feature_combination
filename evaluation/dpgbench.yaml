@@ -1,6 +1,7 @@
 pipeline:
   model_type: "fuse-dit"
   ckpt_path: ["/data/bingda/ckpts/large-scale-800k/"]
+  dtype: "bf16"
 gen:
   prompts_dir: "../ELLA/dpg_bench/prompts"
   seed: 42

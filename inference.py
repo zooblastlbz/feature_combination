@@ -9,9 +9,18 @@ import torch
 def main(args):
     seed_everything(args.seed)
 
-    pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch.bfloat16).to("cuda")
+    if args.dtype == "bf16":
+        torch_dtype = torch.bfloat16
+    elif args.dtype == "fp16":
+        torch_dtype = torch.float16
+    elif args.dtype == "fp32":
+        torch_dtype = torch.float32
+    else:
+        raise ValueError(f"Unknown dtype: {args.dtype}")
 
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
+
+    with torch.autocast("cuda", dtype=torch_dtype):
         image = pipeline(
             args.prompt,
             width=args.resolution,
@@ -32,5 +41,6 @@ if __name__ == "__main__":
     parser.add_argument("--guidance_scale", type=float, default=6.0)
     parser.add_argument("--save_path", type=str, default="test.jpg")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     args = parser.parse_args()
     main(args)
