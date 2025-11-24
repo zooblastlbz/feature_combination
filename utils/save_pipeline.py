@@ -9,10 +9,10 @@ import zstandard as zstd
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 import torch
-from transformers import AutoTokenizer, CLIPTokenizer, GemmaTokenizer, AutoModel, CLIPTextModelWithProjection, AutoConfig
+from transformers import AutoTokenizer, CLIPTokenizer, GemmaTokenizer, AutoModel, CLIPTextModelWithProjection
 
 from diffusion.configs import DiTConfig, FuseDiTConfig
-from diffusion.models import DiT, FuseDiT, AdaFuseDiT, get_llm
+from diffusion.models import DiT, FuseDiT, AdaFuseDiT
 from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
@@ -78,25 +78,13 @@ def main(args):
         print("Falling back to GemmaTokenizer...")
         tokenizer = GemmaTokenizer.from_pretrained(model_path)
 
-    # Load LLM using the same logic as training
-    if args.type in ["baseline-dit", "adafusedit"]:
-        # Ensure base_config is a Config object for get_llm checks
-        if isinstance(config.base_config, dict):
-            base_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        else:
-            base_config = config.base_config
-        
-        llm = get_llm(model_path, base_config)
-    else:
-        llm = None
-
     if args.type == "baseline-dit":
         pipeline = DiTPipeline(
             transformer=transformer,
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=llm,
+            llm=AutoModel.from_pretrained(model_path, trust_remote_code=True),
         )
     elif args.type == "adafusedit":
         pipeline = AdaFuseDiTPipeline(
@@ -104,7 +92,7 @@ def main(args):
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=llm,
+            llm=AutoModel.from_pretrained(model_path, trust_remote_code=True),
         )
     elif args.type == "fuse-dit":
         pipeline = FuseDiTPipeline(
