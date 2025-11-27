@@ -1,19 +1,34 @@
-import json
-import os
-from pydoc import text
-base_dir='/ytech_m2v5_hdd/workspace/kling_mm/yangsihan05/UMA/data/imagenet1k/ImageNet-1K/'
-with open('/ytech_m2v5_hdd/workspace/kling_mm/yangsihan05/UMA/data/imagenet1k/ImageNet-1K/sharegpt_vqa_t2i.json', 'r') as f:
-    data = json.load(f)
-    
-image_text_pair=[]
-num=500000
-for item in data:
-    image=os.path.join(base_dir,item['image'])
-    text=item['conversations'][-1]['value']
-    image_text_pair.append({'image':image,'text':text})
-    if len(image_text_pair)>=num:
-        break
-    
+from transformers import Sam3Processor, Sam3Model
+import torch
+from PIL import Image
+import requests
 
-with open('/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/data/imagenet1k_512_sharegpt_vqa_t2i.json', 'w') as f:
-    json.dump(image_text_pair, f, indent=4,ensure_ascii=False)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+model = Sam3Model.from_pretrained("/ytech_m2v5_hdd/workspace/kling_mm/Models/sam3/").to(device)
+processor = Sam3Processor.from_pretrained("/ytech_m2v5_hdd/workspace/kling_mm/Models/sam3/")
+
+# Load image
+image_url = "/ytech_m2v5_hdd/workspace/kling_mm/dingyue08/spatial-r1/HOI/HOI/data/mini_dataset_100/images/2.JPEG"
+image = Image.open(image_url).convert("RGB")
+
+# Segment using text prompt
+inputs = processor(images=image, text="the man in white jack", return_tensors="pt").to(device)
+
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# Post-process results
+results = processor.post_process_instance_segmentation(
+    outputs,
+    threshold=0.5,
+    mask_threshold=0.5,
+    target_sizes=inputs.get("original_sizes").tolist()
+)[0]
+
+print(f"Found {len(results['masks'])} objects")
+print("boxes:", results["boxes"])
+# Results contain:
+# - masks: Binary masks resized to original image size
+# - boxes: Bounding boxes in absolute pixel coordinates (xyxy format)
+# - scores: Confidence scores
