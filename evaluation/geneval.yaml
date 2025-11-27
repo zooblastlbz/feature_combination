@@ -1,6 +1,6 @@
 pipeline:
   model_type: "adafusedit"
-  ckpt_path: ["/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/30000"]
+  ckpt_path: ["/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/"]
   dtype: "bf16"
 gen:
   metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/geneval/prompts/evaluation_metadata.jsonl" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl

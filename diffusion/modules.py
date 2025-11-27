@@ -28,7 +28,13 @@ class AdaLayerNormZero(nn.Module):
         emb = self.linear(self.silu(emb))
 
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
-        x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+        
+        # Force float32 for norm
+        x_dtype = x.dtype
+        x = self.norm(x.to(dtype=torch.float32))
+        x = x.to(dtype=x_dtype)
+
+        x = x * (1 + scale_msa[:, None]) + shift_msa[:, None]
         return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
     
@@ -44,7 +50,13 @@ class AdaLayerNormOut(nn.Module):
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         emb = self.linear(self.silu(emb))
         scale, shift = torch.chunk(emb, 2, dim=1)
-        x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
+        
+        # Force float32 for norm
+        x_dtype = x.dtype
+        x = self.norm(x.to(dtype=torch.float32))
+        x = x.to(dtype=x_dtype)
+
+        x = x * (1 + scale)[:, None, :] + shift[:, None, :]
         return x
 
 
@@ -112,8 +124,9 @@ class DiTSelfAttention(nn.Module):
         value_states = rearrange(value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
         if self.config.qk_norm:
-            query_states = self.q_norm(query_states)
-            key_states = self.k_norm(key_states)
+            dtype = query_states.dtype
+            query_states = self.q_norm(query_states.to(dtype=torch.float32)).to(dtype=dtype)
+            key_states = self.k_norm(key_states.to(dtype=torch.float32)).to(dtype=dtype)
 
         if not self.config.pos_embed == "ape":
             cos, sin = pos_embed
@@ -124,7 +137,8 @@ class DiTSelfAttention(nn.Module):
             text_value_states = rearrange(text_value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
             if self.config.qk_norm:
-                text_key_states = self.k_norm(text_key_states)
+                dtype = text_key_states.dtype
+                text_key_states = self.k_norm(text_key_states.to(dtype=torch.float32)).to(dtype=dtype)
 
             key_states = torch.cat([text_key_states, key_states], dim=2)
             value_states = torch.cat([text_value_states, value_states], dim=2)
@@ -198,9 +212,10 @@ class DiTCrossAttention(nn.Module):
             value_states = rearrange(value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
         if self.config.qk_norm:
-            query_states = self.q_norm(query_states)
+            dtype = query_states.dtype
+            query_states = self.q_norm(query_states.to(dtype=torch.float32)).to(dtype=dtype)
             if self.config.model_type == "DiT":
-                key_states = self.k_norm(key_states)
+                key_states = self.k_norm(key_states.to(dtype=torch.float32)).to(dtype=dtype)
                 
         if self.config.model_type == "DiT":
             key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -257,7 +272,8 @@ class DiTLayer(nn.Module):
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.input_layernorm(hidden_states, emb=temb)
             shift_msa = scale_msa = torch.zeros_like(temb)
         else:
-            norm_hidden_states = self.input_layernorm(hidden_states)
+            dtype = hidden_states.dtype
+            norm_hidden_states = self.input_layernorm(hidden_states.to(dtype=torch.float32)).to(dtype=dtype)
             if self.config.timestep_conditioning == "adaln-single":
                 shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table + temb).chunk(6, dim=1)
             else:
@@ -271,35 +287,41 @@ class DiTLayer(nn.Module):
             attn_output = self.self_attn(norm_hidden_states, pos_embed, text_hidden_states, attention_mask)
 
             if self.config.sandwich_norm:
-                attn_output = self.post_attention_layernorm(attn_output)
+                dtype = attn_output.dtype
+                attn_output = self.post_attention_layernorm(attn_output.to(dtype=torch.float32)).to(dtype=dtype)
 
             hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
         elif self.config.attention == "cross":
             attn_output = self.self_attn(norm_hidden_states, pos_embed)
 
             if self.config.sandwich_norm:
-                attn_output = self.post_attention_layernorm(attn_output)
+                dtype = attn_output.dtype
+                attn_output = self.post_attention_layernorm(attn_output.to(dtype=torch.float32)).to(dtype=dtype)
 
             hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
 
             cross_attn_output = self.cross_attn(hidden_states, text_hidden_states=text_hidden_states, attention_mask=attention_mask)
 
             if self.config.sandwich_norm:
-                cross_attn_output = self.post_cross_attention_layernorm(cross_attn_output)
+                dtype = cross_attn_output.dtype
+                cross_attn_output = self.post_cross_attention_layernorm(cross_attn_output.to(dtype=torch.float32)).to(dtype=dtype)
 
             hidden_states = hidden_states + cross_attn_output
 
         if self.config.sandwich_norm:
-            norm_hidden_states = self.pre_feedforward_layernorm(hidden_states)
+            dtype = hidden_states.dtype
+            norm_hidden_states = self.pre_feedforward_layernorm(hidden_states.to(dtype=torch.float32)).to(dtype=dtype)
         else:
-            norm_hidden_states = self.post_attention_layernorm(hidden_states)
+            dtype = hidden_states.dtype
+            norm_hidden_states = self.post_attention_layernorm(hidden_states.to(dtype=torch.float32)).to(dtype=dtype)
 
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
 
         mlp_output = self.mlp(norm_hidden_states)
 
         if self.config.sandwich_norm:
-            mlp_output = self.post_feedforward_layernorm(mlp_output)
+            dtype = mlp_output.dtype
+            mlp_output = self.post_feedforward_layernorm(mlp_output.to(dtype=torch.float32)).to(dtype=dtype)
 
         hidden_states = hidden_states + gate_mlp.unsqueeze(1) * mlp_output
 

@@ -62,14 +62,14 @@ class TimestepWiseFeatureWeighting(nn.Module):
         self.time_embed_dim = time_embed_dim
         self.feature_dim = feature_dim
 
-        # 定义用于生成权重的MLP网络
+        # 定义用于生成权重的MLP网络（不包含 Softmax）
         # hidden_dim 自动设置为 time_embed_dim 的 4 倍
         hidden_dim = time_embed_dim * 4
         self.weight_generator = nn.Sequential(
             nn.Linear(time_embed_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, num_layers),
-            nn.Softmax(dim=-1)
+            # Softmax 移除，在 forward 中显式用 float32 执行
         )
 
     def _time_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
@@ -115,32 +115,40 @@ class TimestepWiseFeatureWeighting(nn.Module):
         if len(hidden_states) != self.num_layers:
             raise ValueError(f"Expected {self.num_layers} hidden states, but got {len(hidden_states)}")
 
+        # 保存原始 dtype 用于最后转回
+        dtype = hidden_states[0].dtype
+
         # 在聚合前对每层应用 layer norm（不可训练）
         # 使用 F.layer_norm 以避免引入可训练参数
+        # Force float32 for layer_norm
         normalized_hidden_states = [
-            F.layer_norm(h, normalized_shape=(self.feature_dim,))
+            F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.feature_dim,))
             for h in hidden_states
         ]
 
         # 堆叠隐藏状态: (num_layers, batch_size, seq_len, feature_dim)
+        # 保持 float32 精度进行后续计算
         stacked_hidden_states = torch.stack(normalized_hidden_states, dim=0)
 
-        # 生成时序权重
-        t_embed = self._time_embedding(timesteps)
-        weights = self.weight_generator(t_embed)
+        # 生成时序权重 (在 float32 下计算，避免 softmax 精度问题)
+        t_embed = self._time_embedding(timesteps)  # 已经是 float32
+        # 显式确保 Softmax 在 float32 下执行
+        weight_logits = self.weight_generator(t_embed)
+        weights = F.softmax(weight_logits.float(), dim=-1)
 
-        # 加权求和
+        # 加权求和 (在 float32 下进行，避免累加误差)
         broadcastable_weights = weights.T.unsqueeze(-1).unsqueeze(-1)
         weighted_states = stacked_hidden_states * broadcastable_weights
         combined_features = torch.sum(weighted_states, dim=0)
 
-        return combined_features, weights
+        # 转回原始 dtype
+        return combined_features.to(dtype), weights
 
 
 def get_llm(model: str, base_config: PretrainedConfig):
     if isinstance(base_config, GemmaConfig):
         return GemmaForCausalLM.from_pretrained(model).model
-    elif isinstance(base_config, Gemma2Config):
+    elif (base_config, Gemma2Config):
         return Gemma2ForCausalLM.from_pretrained(model).model
     elif isinstance(base_config, PaliGemmaConfig):
         return PaliGemmaForConditionalGeneration.from_pretrained(model).language_model.model
@@ -379,7 +387,11 @@ class DiT(PreTrainedModel):
             temb = torch.zeros_like(hidden_states[:, 0, :])
 
         hidden_states, pos_embed = self.prepare_hidden_states(hidden_states, temb, height, width)
-        text_hidden_states = self.context_embedder(text_hidden_states)
+        
+        # Force float32 for context_embedder (which contains Norm)
+        if text_hidden_states is not None:
+            dtype = text_hidden_states.dtype
+            text_hidden_states = self.context_embedder(text_hidden_states.to(dtype=torch.float32)).to(dtype)
 
         cross_attention_mask = update_cross_attention_mask(
             attention_mask,
@@ -406,7 +418,10 @@ class DiT(PreTrainedModel):
         if self.config.timestep_conditioning == "adaln-zero":
             hidden_states = self.norm_out(hidden_states, temb)
         else:
-            hidden_states = self.norm_out(hidden_states)
+            # Force float32 for norm_out
+            dtype = hidden_states.dtype
+            hidden_states = self.norm_out(hidden_states.to(dtype=torch.float32)).to(dtype)
+            
         if self.config.timestep_conditioning == "adaln-single":
             shift, scale = (self.scale_shift_table + repeat(timestep, "b d -> b (2 d)")).chunk(2, dim=1)
             hidden_states = hidden_states * (1 + scale[:, None]) + shift[:, None]
@@ -609,6 +624,9 @@ class AdaFuseDiT(PreTrainedModel):
             # 不使用多层融合，直接返回单层特征
             return text_hidden_states[0] if isinstance(text_hidden_states, list) else text_hidden_states
         
+        # 保存原始 dtype 用于最后转回
+        dtype = text_hidden_states[0].dtype
+        
         if self.config.use_layer_wise_fusion:
             # 每层独立融合
             if self.config.use_timestep_adaptive_fusion:
@@ -621,16 +639,18 @@ class AdaFuseDiT(PreTrainedModel):
             else:
                 # 模式 3: 使用该层的可学习权重
                 # 先对每层进行 layer norm（不可训练）
+                # Force float32 for layer_norm
                 normalized_hidden_states = [
-                    F.layer_norm(h, normalized_shape=(self.config.text_hidden_size,))
+                    F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.config.text_hidden_size,))
                     for h in text_hidden_states
                 ]
-                weights = F.softmax(self.text_fusion_weights[layer_idx], dim=0)
+                # Force float32 for softmax
+                weights = F.softmax(self.text_fusion_weights[layer_idx].float(), dim=0)
                 stacked = torch.stack(normalized_hidden_states, dim=0)
                 fused_text = torch.sum(
                     stacked * weights.view(-1, 1, 1, 1),
                     dim=0
-                )
+                ).to(dtype)
         else:
             # 全局共享融合
             if self.config.use_timestep_adaptive_fusion:
@@ -643,16 +663,18 @@ class AdaFuseDiT(PreTrainedModel):
             else:
                 # 模式 1: 使用全局可学习权重
                 # 先对每层进行 layer norm（不可训练）
+                # Force float32 for layer_norm
                 normalized_hidden_states = [
-                    F.layer_norm(h, normalized_shape=(self.config.text_hidden_size,))
+                    F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.config.text_hidden_size,))
                     for h in text_hidden_states
                 ]
-                weights = F.softmax(self.text_fusion_weight, dim=0)
+                # Force float32 for softmax
+                weights = F.softmax(self.text_fusion_weight.float(), dim=0)
                 stacked = torch.stack(normalized_hidden_states, dim=0)
                 fused_text = torch.sum(
                     stacked * weights.view(-1, 1, 1, 1),
                     dim=0
-                )
+                ).to(dtype)
         
         return fused_text
 
@@ -749,7 +771,9 @@ class AdaFuseDiT(PreTrainedModel):
             )
             
             # 映射到 DiT 的隐藏维度
-            fused_text = self.context_embedder(fused_text)
+            # Force float32 for context_embedder
+            dtype = fused_text.dtype
+            fused_text = self.context_embedder(fused_text.to(dtype=torch.float32)).to(dtype)
             
             # 执行 DiT 层
             if self.gradient_checkpointing and self.training:
@@ -773,7 +797,9 @@ class AdaFuseDiT(PreTrainedModel):
         if self.config.timestep_conditioning == "adaln-zero":
             hidden_states = self.norm_out(hidden_states, temb)
         else:
-            hidden_states = self.norm_out(hidden_states)
+            # Force float32 for norm_out
+            dtype = hidden_states.dtype
+            hidden_states = self.norm_out(hidden_states.to(dtype=torch.float32)).to(dtype)
         if self.config.timestep_conditioning == "adaln-single":
             shift, scale = (self.scale_shift_table + repeat(timestep_embed, "b d -> b (2 d)")).chunk(2, dim=1)
             hidden_states = hidden_states * (1 + scale[:, None]) + shift[:, None]
@@ -878,7 +904,9 @@ class FuseDiT(PreTrainedModel):
             ) = self.dit.layers[index - self.config.initial_layers].input_layernorm(dit_hidden_states, emb=temb)
             dit_scale_msa = dit_shift_msa = torch.zeros_like(temb) # Dummy values.
         else:
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].input_layernorm(dit_hidden_states)
+            # Force float32 for input_layernorm
+            dtype = dit_hidden_states.dtype
+            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].input_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
             if self.config.timestep_conditioning == "adaln-single":
                 (
                     dit_shift_msa,
@@ -894,7 +922,9 @@ class FuseDiT(PreTrainedModel):
 
         norm_dit_hidden_states = norm_dit_hidden_states * (1 + dit_scale_msa[:, None]) + dit_shift_msa[:, None]
         if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
-            norm_llm_hidden_states = self.llm.layers[index].input_layernorm(llm_hidden_states)
+            # Force float32 for llm input_layernorm
+            dtype = llm_hidden_states.dtype
+            norm_llm_hidden_states = self.llm.layers[index].input_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
 
         ########## Self Attention Begins ##########
 
@@ -916,8 +946,10 @@ class FuseDiT(PreTrainedModel):
             llm_value_states = rearrange(llm_value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
         if self.config.qk_norm:
-            dit_query_states = self.dit.layers[index - self.config.initial_layers].self_attn.q_norm(dit_query_states)
-            dit_key_states = self.dit.layers[index - self.config.initial_layers].self_attn.k_norm(dit_key_states)
+            # Force float32 for qk_norm
+            dtype = dit_query_states.dtype
+            dit_query_states = self.dit.layers[index - self.config.initial_layers].self_attn.q_norm(dit_query_states.to(dtype=torch.float32)).to(dtype)
+            dit_key_states = self.dit.layers[index - self.config.initial_layers].self_attn.k_norm(dit_key_states.to(dtype=torch.float32)).to(dtype)
 
         if self.config.attention == "self":
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
@@ -954,14 +986,18 @@ class FuseDiT(PreTrainedModel):
             dit_attn_output = attn_output[:, -dit_hidden_states.shape[1]:]
             dit_attn_output = self.dit.layers[index - self.config.initial_layers].self_attn.o_proj(dit_attn_output)
             if self.config.sandwich_norm:
-                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output)
+                # Force float32 for post_attention_layernorm
+                dtype = dit_attn_output.dtype
+                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
             dit_hidden_states = dit_hidden_states + dit_gate_msa.unsqueeze(1) * dit_attn_output
 
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
                 llm_attn_output = attn_output[:, :-dit_hidden_states.shape[1]]
                 llm_attn_output = self.llm.layers[index].self_attn.o_proj(llm_attn_output)
                 if self.config.base_config.model_type == "gemma2":
-                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output)
+                    # Force float32 for llm post_attention_layernorm
+                    dtype = llm_attn_output.dtype
+                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
                 llm_hidden_states = llm_hidden_states + llm_attn_output
         elif self.config.attention == "cross":
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
@@ -996,7 +1032,9 @@ class FuseDiT(PreTrainedModel):
                 llm_attn_output = self.llm.layers[index].self_attn.o_proj(llm_attn_output)
 
                 if self.config.base_config.model_type == "gemma2":
-                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output)
+                    # Force float32 for llm post_attention_layernorm
+                    dtype = llm_attn_output.dtype
+                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
             else:
                 llm_key_states = past_key_values.key_cache[index - self.config.initial_layers]
                 llm_value_states = past_key_values.value_cache[index - self.config.initial_layers]
@@ -1021,7 +1059,9 @@ class FuseDiT(PreTrainedModel):
             dit_attn_output = self.dit.layers[index - self.config.initial_layers].self_attn.o_proj(dit_attn_output)
 
             if self.config.sandwich_norm:
-                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output)
+                # Force float32 for post_attention_layernorm
+                dtype = dit_attn_output.dtype
+                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
 
         ########## Self Attention Ends ##########
 
@@ -1037,7 +1077,9 @@ class FuseDiT(PreTrainedModel):
             )
 
             if self.config.sandwich_norm:
-                dit_cross_attn_output = self.dit.layers[index - self.config.initial_layers].post_cross_attention_layernorm(dit_cross_attn_output)
+                # Force float32 for post_cross_attention_layernorm
+                dtype = dit_cross_attn_output.dtype
+                dit_cross_attn_output = self.dit.layers[index - self.config.initial_layers].post_cross_attention_layernorm(dit_cross_attn_output.to(dtype=torch.float32)).to(dtype)
 
             dit_hidden_states = dit_hidden_states + dit_cross_attn_output
 
@@ -1052,23 +1094,35 @@ class FuseDiT(PreTrainedModel):
         ########## Feedforward Begins ##########
         
         if self.config.sandwich_norm:
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].pre_feedforward_layernorm(dit_hidden_states)
+            # Force float32 for pre_feedforward_layernorm
+            dtype = dit_hidden_states.dtype
+            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].pre_feedforward_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
         else:
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_hidden_states)
+            # Force float32 for post_attention_layernorm
+            dtype = dit_hidden_states.dtype
+            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
         norm_dit_hidden_states = norm_dit_hidden_states * (1 + dit_scale_mlp[:, None]) + dit_shift_mlp[:, None]
         dit_mlp_output = self.dit.layers[index - self.config.initial_layers].mlp(norm_dit_hidden_states)
         if self.config.sandwich_norm:
-            dit_mlp_output = self.dit.layers[index - self.config.initial_layers].post_feedforward_layernorm(dit_mlp_output)
+            # Force float32 for post_feedforward_layernorm
+            dtype = dit_mlp_output.dtype
+            dit_mlp_output = self.dit.layers[index - self.config.initial_layers].post_feedforward_layernorm(dit_mlp_output.to(dtype=torch.float32)).to(dtype)
         dit_hidden_states = dit_hidden_states + dit_gate_mlp.unsqueeze(1) * dit_mlp_output
 
         if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
             if self.config.base_config.model_type == "gemma2":
-                norm_llm_hidden_states = self.llm.layers[index].pre_feedforward_layernorm(llm_hidden_states)
+                # Force float32 for llm pre_feedforward_layernorm
+                dtype = llm_hidden_states.dtype
+                norm_llm_hidden_states = self.llm.layers[index].pre_feedforward_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
             else:
-                norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states)
+                # Force float32 for llm post_attention_layernorm
+                dtype = llm_hidden_states.dtype
+                norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
             llm_mlp_output = self.llm.layers[index].mlp(norm_llm_hidden_states)
             if self.config.base_config.model_type == "gemma2":
-                llm_mlp_output = self.llm.layers[index].post_feedforward_layernorm(llm_mlp_output)
+                # Force float32 for llm post_feedforward_layernorm
+                dtype = llm_mlp_output.dtype
+                llm_mlp_output = self.llm.layers[index].post_feedforward_layernorm(llm_mlp_output.to(dtype=torch.float32)).to(dtype)
             llm_hidden_states = llm_hidden_states + llm_mlp_output
 
         return dit_hidden_states, llm_hidden_states
@@ -1187,7 +1241,10 @@ class FuseDiT(PreTrainedModel):
             timestep = self.dit.timestep_embedder(timestep)
 
             if self.config.text_modulation_embeds_dim is not None:
-                timestep = timestep + self.dit.condition_embedder(text_modulation_embeds)
+                # Force float32 for condition_embedder
+                dtype = text_modulation_embeds.dtype
+                cond_embeds = self.dit.condition_embedder(text_modulation_embeds.to(dtype=torch.float32)).to(dtype)
+                timestep = timestep + cond_embeds
 
             if self.config.timestep_conditioning == "adaln-single":
                 temb = self.dit.t_block(timestep)
@@ -1314,7 +1371,9 @@ class FuseDiT(PreTrainedModel):
         if self.config.timestep_conditioning == "adaln-zero":
             dit_hidden_states = self.dit.norm_out(dit_hidden_states, temb)
         else:
-            dit_hidden_states = self.dit.norm_out(dit_hidden_states)
+            # Force float32 for norm_out
+            dtype = dit_hidden_states.dtype
+            dit_hidden_states = self.dit.norm_out(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
         if self.config.timestep_conditioning == "adaln-single":
             shift, scale = (self.dit.scale_shift_table + repeat(timestep, "b d -> b (2 d)")).chunk(2, dim=1)
             dit_hidden_states = dit_hidden_states * (1 + scale[:, None]) + shift[:, None]
