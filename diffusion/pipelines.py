@@ -15,6 +15,8 @@
 import inspect
 from typing import Callable, Dict, List, Optional, Union
 
+from regex import F
+
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.loaders import FromSingleFileMixin
 from diffusers.models.autoencoders import AutoencoderKL
@@ -1023,18 +1025,21 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         input_ids = tokenized.input_ids
         attention_mask = tokenized.attention_mask
 
-        llm_attention_mask = update_self_attention_mask(attention_mask, 0, False, self.device, self.llm.dtype)
+        # 使用 float32 的 attention mask 确保 LLM 推理稳定
+        llm_attention_mask = update_self_attention_mask(attention_mask, 0, False, self.device, torch.float32)
         position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
 
         # === AdaFuseDiT 核心：提取多层文本特征 ===
-        llm_output = self.llm(
-            input_ids.to(self.device),
-            llm_attention_mask,
-            position_ids,
-            use_cache=False,
-            output_hidden_states=True,
-            return_dict=False,
-        )
+        # LLM 使用 autocast 进行推理，自动处理精度敏感操作
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,enabled=False):
+            llm_output = self.llm.float()(
+                input_ids.to(self.device),
+                llm_attention_mask,
+                position_ids,
+                use_cache=False,
+                output_hidden_states=True,
+                return_dict=False,
+            )
         
         # 获取所有隐藏层
         all_hidden_states = llm_output[1]  # tuple of hidden states
@@ -1083,48 +1088,50 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
             latents,
         )
 
-        # 6. Denoising loop
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                if self.interrupt:
-                    continue
+        # 6. Denoising loop - 使用 autocast 自动处理精度
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16,enabled=False):
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, t in enumerate(timesteps):
+                    if self.interrupt:
+                        continue
 
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = t.expand(latent_model_input.shape[0])
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+                    timestep = t.expand(latent_model_input.shape[0])
 
-                # === AdaFuseDiT 前向传播：传入多层文本特征 ===
-                noise_pred = self.transformer(
-                    hidden_states=latent_model_input,
-                    timestep=timestep,
-                    text_hidden_states=text_hidden_states,  # list or single tensor
-                    attention_mask=attention_mask,
-                )
+                    # === AdaFuseDiT 前向传播：传入多层文本特征 ===
+                    noise_pred = self.transformer(
+                        hidden_states=latent_model_input,
+                        timestep=timestep,
+                        text_hidden_states=text_hidden_states,  # list or single tensor
+                        attention_mask=attention_mask,
+                    )
+                    if torch.isnan(noise_pred).any():
+                        print(f"NaN detected in noise_pred at step {i}, timestep {t}")
+                    # perform guidance
+                    if self.do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents_dtype = latents.dtype
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                    if latents.dtype != latents_dtype:
+                        if torch.backends.mps.is_available():
+                            latents = latents.to(latents_dtype)
 
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        latents = latents.to(latents_dtype)
+                    if callback_on_step_end is not None:
+                        callback_kwargs = {}
+                        for k in callback_on_step_end_tensor_inputs:
+                            callback_kwargs[k] = locals()[k]
+                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                        latents = callback_outputs.pop("latents", latents)
 
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-                    latents = callback_outputs.pop("latents", latents)
-
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
 
         if output_type == "latent":
             image = latents
