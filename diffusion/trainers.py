@@ -131,6 +131,7 @@ class Trainer(ABC):
     def dit_training_step(self, batch):
         pixel_values = batch["pixel_values"]
 
+        # ===== 1. LLM 推理：使用 no_grad =====
         if self.hparams.model.encoder_type == "llm":
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"].to(self.device)
@@ -139,28 +140,32 @@ class Trainer(ABC):
 
             position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
 
-            text_hidden_states = self.llm(
-                input_ids.to(self.device),
-                llm_attention_mask,
-                position_ids,
-                use_cache=False,
-                output_hidden_states=True,
-                return_dict=False,
-            )[1][self.hparams.model.text_hidden_states_index].to(dtype=pixel_values.dtype)
+            with torch.no_grad():
+                text_hidden_states = self.llm(
+                    input_ids.to(self.device),
+                    llm_attention_mask,
+                    position_ids,
+                    use_cache=False,
+                    output_hidden_states=True,
+                    return_dict=False,
+                )[1][self.hparams.model.text_hidden_states_index]
+            # 转换为训练精度，与 DeepSpeed 管理的模型参数匹配
+            text_hidden_states = text_hidden_states.to(dtype=self.train_dtype)
         else:
             raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder}")
 
-        # Convert images to latent space
+        # ===== 2. VAE 编码：使用 no_grad，VAE 保持 float32 =====
         model_input = pixel_values.to(self.device)
-        model_input = self.vae.encode(model_input).latent_dist.sample()
+        with torch.no_grad():
+            model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+        # 转换为训练精度，与 DeepSpeed 管理的模型参数匹配
+        model_input = model_input.to(dtype=self.train_dtype)
 
-        # Sample noise that we'll add to the latents
-        noise = torch.randn_like(model_input).to(self.device)
+        # ===== 3. DiT 前向（由 DeepSpeed 管理精度） =====
+        noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
 
-        # Sample a random timestep for each image
-        # for weighting schemes where we sample timesteps non-uniformly
         u = compute_density_for_timestep_sampling(
             weighting_scheme=self.hparams.trainer.weighting_scheme,
             batch_size=bsz,
@@ -171,12 +176,9 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        # Add noise according to flow matching.
-        # zt = (1 - texp) * x + texp * z1
         sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
-        # Predict the noise residual
         output = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.device),
@@ -185,22 +187,17 @@ class Trainer(ABC):
         )
         model_pred = output
 
-        # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
-        # Preconditioning of the model outputs.
         if self.hparams.trainer.precondition_outputs:
             model_pred = model_pred * (-sigmas) + noisy_model_input
 
-        # these weighting schemes use a uniform timestep sampling
-        # and instead post-weight the loss
         weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
-        # flow matching loss
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
             target = noise - model_input
 
-        # Compute regular loss.
+        # Loss 计算显式转 float32，避免精度问题
         loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
         loss = loss.mean()
 
@@ -211,23 +208,28 @@ class Trainer(ABC):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
 
+        # ===== 1. CLIP 推理：使用 no_grad =====
         if self.hparams.model.encoder_type == "clip-llm":
             clip_input_ids = batch["clip_input_ids"]
-            text_modulation_embeds = self.clip(clip_input_ids.to(self.device)).text_embeds.to(dtype=pixel_values.dtype)
+            with torch.no_grad():
+                text_modulation_embeds = self.clip(clip_input_ids.to(self.device)).text_embeds
+            # 转换为训练精度
+            text_modulation_embeds = text_modulation_embeds.to(dtype=self.train_dtype)
         else:
             text_modulation_embeds = None
 
-        # Convert images to latent space
+        # ===== 2. VAE 编码：使用 no_grad，VAE 保持 float32 =====
         model_input = pixel_values.to(self.device)
-        model_input = self.vae.encode(model_input).latent_dist.sample()
+        with torch.no_grad():
+            model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+        # 转换为训练精度
+        model_input = model_input.to(dtype=self.train_dtype)
 
-        # Sample noise that we'll add to the latents
-        noise = torch.randn_like(model_input).to(self.device)
+        # ===== 3. FuseDiT 前向（由 DeepSpeed 管理精度） =====
+        noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
 
-        # Sample a random timestep for each image
-        # for weighting schemes where we sample timesteps non-uniformly
         u = compute_density_for_timestep_sampling(
             weighting_scheme=self.hparams.trainer.weighting_scheme,
             batch_size=bsz,
@@ -238,12 +240,9 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        # Add noise according to flow matching.
-        # zt = (1 - texp) * x + texp * z1
         sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
-        # Predict the noise residual
         output = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.device),
@@ -253,22 +252,17 @@ class Trainer(ABC):
         )
         model_pred = output[0]
 
-        # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
-        # Preconditioning of the model outputs.
         if self.hparams.trainer.precondition_outputs:
             model_pred = model_pred * (-sigmas) + noisy_model_input
 
-        # these weighting schemes use a uniform timestep sampling
-        # and instead post-weight the loss
         weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
-        # flow matching loss
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
             target = noise - model_input
 
-        # Compute regular loss.
+        # Loss 计算显式转 float32
         loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
         loss = loss.mean()
 
@@ -282,58 +276,48 @@ class Trainer(ABC):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"].to(self.device)
 
-        # 提取多层文本特征
+        # ===== 1. LLM 推理：使用 no_grad =====
         llm_attention_mask = update_self_attention_mask(
             attention_mask, 0, False, self.device, 
             torch.float32 if ACCEL == "xla" else self.llm.dtype
         )
         position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
 
-        # 获取所有隐藏层
-        llm_output = self.llm(
-            input_ids.to(self.device),
-            llm_attention_mask,
-            position_ids,
-            use_cache=False,
-            output_hidden_states=True,
-            return_dict=False,
-        )
-        all_hidden_states = llm_output[1]  # tuple of hidden states
+        with torch.no_grad():
+            llm_output = self.llm(
+                input_ids.to(self.device),
+                llm_attention_mask,
+                position_ids,
+                use_cache=False,
+                output_hidden_states=True,
+                return_dict=False,
+            )
+        all_hidden_states = llm_output[1]
         
-        # 根据配置提取需要的层数
-        text_hidden_states_num = getattr(
-            self.hparams.model, 'text_hidden_states_num', 1
-        )
+        text_hidden_states_num = getattr(self.hparams.model, 'text_hidden_states_num', 1)
         
         if text_hidden_states_num > 1:
-            # 提取最后 N 层作为 list
-            # 例如：text_hidden_states_num=4 时，提取 [-4, -3, -2, -1] 层
+            # 转换为训练精度
             text_hidden_states = [
-                all_hidden_states[-text_hidden_states_num + i].to(dtype=pixel_values.dtype)
+                all_hidden_states[-text_hidden_states_num + i].to(dtype=self.train_dtype)
                 for i in range(text_hidden_states_num)
             ]
         else:
-            # 单层模式（向后兼容）
-            text_hidden_states_index = getattr(
-                self.hparams.model, 'text_hidden_states_index', -1
-            )
-            text_hidden_states = all_hidden_states[text_hidden_states_index].to(
-                dtype=pixel_values.dtype
-            )
+            text_hidden_states_index = getattr(self.hparams.model, 'text_hidden_states_index', -1)
+            text_hidden_states = all_hidden_states[text_hidden_states_index].to(dtype=self.train_dtype)
 
-        # Convert images to latent space
+        # ===== 2. VAE 编码：使用 no_grad，VAE 保持 float32 =====
         model_input = pixel_values.to(self.device)
-        model_input = self.vae.encode(model_input).latent_dist.sample()
-        model_input = (
-            (model_input - self.vae.config.shift_factor) * 
-            self.vae.config.scaling_factor
-        )
+        with torch.no_grad():
+            model_input = self.vae.encode(model_input.float()).latent_dist.sample()
+        model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+        # 转换为训练精度
+        model_input = model_input.to(dtype=self.train_dtype)
 
-        # Sample noise that we'll add to the latents
-        noise = torch.randn_like(model_input).to(self.device)
+        # ===== 3. AdaFuseDiT 前向（由 DeepSpeed 管理精度） =====
+        noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
 
-        # Sample a random timestep for each image
         u = compute_density_for_timestep_sampling(
             weighting_scheme=self.hparams.trainer.weighting_scheme,
             batch_size=bsz,
@@ -344,41 +328,29 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        # Add noise according to flow matching
-        sigmas = self.get_sigmas(
-            timesteps, n_dim=model_input.ndim, dtype=model_input.dtype
-        ).to(self.device)
+        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
-        # Predict the noise residual (传入多层文本特征)
         model_pred = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.device),
-            text_hidden_states=text_hidden_states,  # list or single tensor
+            text_hidden_states=text_hidden_states,
             attention_mask=attention_mask,
         )
 
-        # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
         if self.hparams.trainer.precondition_outputs:
             model_pred = model_pred * (-sigmas) + noisy_model_input
 
-        # Weighting schemes
-        weighting = compute_loss_weighting_for_sd3(
-            weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas
-        )
+        weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
-        # Flow matching loss
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
             target = noise - model_input
 
-        # Compute loss
+        # Loss 计算显式转 float32
         loss = torch.mean(
-            (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(
-                target.shape[0], -1
-            ), 
-            1
+            (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1
         )
         loss = loss.mean()
 
@@ -410,9 +382,8 @@ class Trainer(ABC):
         self.before_training()
 
         for step in range((self.hparams.trainer.max_steps - self.global_step) * self.hparams.trainer.gradient_accumulation_steps):
-            with torch.autocast(ACCEL, dtype=torch.bfloat16 if self.hparams.trainer.mixed_precision == "bf16" else torch.float32):
-                batch = next(self.dataloader)
-                loss = self.training_step(batch)
+            batch = next(self.dataloader)
+            loss = self.training_step(batch)
 
             self.backward(loss)
 
@@ -438,6 +409,9 @@ class SPMDTrainer(Trainer):
 
         if self.hparams.trainer.seed is not None:
             seed_everything(hparams.trainer.seed)
+
+        # 设置训练精度
+        self.train_dtype = torch.bfloat16 if hparams.trainer.mixed_precision == "bf16" else torch.float32
 
         xr.use_spmd()
         if hparams.trainer.cache_dir is not None:
@@ -638,6 +612,9 @@ class DeepSpeedTrainer(Trainer):
         if self.hparams.trainer.seed is not None:
             seed_everything(hparams.trainer.seed)
 
+        # 设置训练精度
+        self.train_dtype = torch.bfloat16 if hparams.trainer.mixed_precision == "bf16" else torch.float32
+
         deepspeed.init_distributed()
         deepspeed.get_accelerator().set_device(local_rank)
         self.device = torch.device(deepspeed.get_accelerator().device_name(), local_rank)
@@ -663,7 +640,7 @@ class DeepSpeedTrainer(Trainer):
             if self.hparams.model.encoder_type == "llm":
                 self.llm = get_llm(self.hparams.model.base, self.model.config.base_config)
                 self.llm.requires_grad_(False)
-                self.llm.to(self.device)
+                self.llm.to(self.device, dtype=self.train_dtype)  # 转换为训练精度
             else:
                 raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
             self.training_step = self.dit_training_step
@@ -671,7 +648,7 @@ class DeepSpeedTrainer(Trainer):
             if self.hparams.model.encoder_type == "llm":
                 self.llm = get_llm(self.hparams.model.base, self.model.config.base_config)
                 self.llm.requires_grad_(False)
-                self.llm.to(self.device)
+                self.llm.to(self.device, dtype=self.train_dtype)  # 转换为训练精度
             else:
                 raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder_type}")
             self.training_step = self.adafusedit_training_step
@@ -679,7 +656,7 @@ class DeepSpeedTrainer(Trainer):
             if self.hparams.model.encoder_type == "clip-llm":
                 self.clip = CLIPTextModelWithProjection.from_pretrained(**self.hparams.clip_l)
                 self.clip.requires_grad_(False)
-                self.clip.to(self.device)
+                self.clip.to(self.device, dtype=self.train_dtype)  # 转换为训练精度
             self.training_step = self.fusedit_training_step
         else:
             raise ValueError(f"Unknown model name: {self.hparams.model.name}")
@@ -740,6 +717,9 @@ class DeepSpeedTrainer(Trainer):
                 "flops_profiler": {
                     "enabled": True,
                     "output_file": os.path.join(self.hparams.trainer.checkpoint_dir, "flops.txt"),
+                },
+                "bf16": {
+                    "enabled": (self.hparams.trainer.mixed_precision == "bf16"),
                 }
             }
             if dist.get_rank() == 0:

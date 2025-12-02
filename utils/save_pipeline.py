@@ -77,6 +77,25 @@ def main(args):
         print(f"Failed to load AutoTokenizer from {model_path}: {e}")
         print("Falling back to GemmaTokenizer...")
         tokenizer = GemmaTokenizer.from_pretrained(model_path)
+        
+
+    try:
+        from transformers import AutoModelForCausalLM
+        lm = AutoModelForCausalLM.from_pretrained(model_path)
+        return lm.model if hasattr(lm, "model") else lm
+    except Exception:
+        pass
+    # 2) Try vision-language models and extract the language sub-module
+    try:
+        from transformers import AutoModelForImageTextToText
+        vl = AutoModelForImageTextToText.from_pretrained(model_path)
+        for attr in ["language_model", "text_model", "model"]:
+            if hasattr(vl, attr):
+                lm = getattr(vl, attr)
+    except Exception as e:
+        raise ValueError(f"Unknown model: {model_path}") from e
+
+
 
     if args.type == "baseline-dit":
         pipeline = DiTPipeline(
@@ -84,7 +103,7 @@ def main(args):
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=AutoModel.from_pretrained(model_path, trust_remote_code=True),
+            llm=lm,
         )
     elif args.type == "adafusedit":
         pipeline = AdaFuseDiTPipeline(
@@ -92,7 +111,7 @@ def main(args):
             scheduler=FlowMatchEulerDiscreteScheduler.from_pretrained(args.scheduler, subfolder="scheduler"),
             vae=AutoencoderKL.from_pretrained(args.vae, subfolder="vae"),
             tokenizer=tokenizer,
-            llm=AutoModel.from_pretrained(model_path, trust_remote_code=True),
+            llm=lm,
         )
     elif args.type == "fuse-dit":
         pipeline = FuseDiTPipeline(
