@@ -130,10 +130,13 @@ class TimestepWiseFeatureWeighting(nn.Module):
         # 保持 float32 精度进行后续计算
         stacked_hidden_states = torch.stack(normalized_hidden_states, dim=0)
 
-        # 生成时序权重 (在 float32 下计算，避免 softmax 精度问题)
-        t_embed = self._time_embedding(timesteps)  # 已经是 float32
-        # 显式确保 Softmax 在 float32 下执行
-        weight_logits = self.weight_generator(t_embed)
+        # 生成时序权重
+        # 获取 weight_generator 的权重 dtype（由 DeepSpeed 管理，可能是 bfloat16）
+        weight_generator_dtype = next(self.weight_generator.parameters()).dtype
+        t_embed = self._time_embedding(timesteps)  # float32
+        # 将 t_embed 转换为与 weight_generator 相同的 dtype，让 DeepSpeed 管理精度
+        weight_logits = self.weight_generator(t_embed.to(weight_generator_dtype))
+        # 显式确保 Softmax 在 float32 下执行，避免精度问题
         weights = F.softmax(weight_logits.float(), dim=-1)
 
         # 加权求和 (在 float32 下进行，避免累加误差)
