@@ -62,34 +62,24 @@ class TimestepWiseFeatureWeighting(nn.Module):
         self.time_embed_dim = time_embed_dim
         self.feature_dim = feature_dim
 
-        # 定义用于生成权重的MLP网络（不包含 Softmax）
-        # hidden_dim 自动设置为 time_embed_dim 的 4 倍
+        # 定义用于生成权重的MLP网络
         hidden_dim = time_embed_dim * 4
         self.weight_generator = nn.Sequential(
             nn.Linear(time_embed_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, num_layers),
-            # Softmax 移除，在 forward 中显式用 float32 执行
         )
 
     def _time_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         """
         使用正弦/余弦编码将时间步t转换为高维向量。
-
-        Args:
-            timesteps (torch.Tensor): 批量的timesteps，shape: (batch_size,)。
-
-        Returns:
-            torch.Tensor: 编码后的时间嵌入向量，shape: (batch_size, time_embed_dim)。
         """
-        timesteps = timesteps.unsqueeze(-1)
-        
         half_dim = self.time_embed_dim // 2
         freqs = torch.exp(
-            -math.log(10000) * torch.arange(start=0, end=half_dim, dtype=torch.float32) / half_dim
-        ).to(timesteps.device)
+            -math.log(10000) * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=timesteps.device) / half_dim
+        )
         
-        args = timesteps * freqs.unsqueeze(0)
+        args = timesteps.unsqueeze(-1).float() * freqs.unsqueeze(0)
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         
         if self.time_embed_dim % 2 != 0:
@@ -100,52 +90,32 @@ class TimestepWiseFeatureWeighting(nn.Module):
     def forward(self, hidden_states: list, timesteps: torch.Tensor):
         """
         模块的前向传播逻辑。
-
-        Args:
-            hidden_states (list[torch.Tensor]): 包含多层特征的列表。
-                列表中每个元素的 shape 都是 (batch_size, seq_len, feature_dim)。
-            timesteps (torch.Tensor): 扩散模型的timesteps。
-                shape 为 (batch_size,)。
-
-        Returns:
-            tuple: (combined_features, weights)
-                - combined_features: 加权组合后的特征，shape: (batch_size, seq_len, feature_dim)。
-                - weights: 生成的权重，shape: (batch_size, num_layers)。
         """
         if len(hidden_states) != self.num_layers:
             raise ValueError(f"Expected {self.num_layers} hidden states, but got {len(hidden_states)}")
 
-        # 保存原始 dtype 用于最后转回
         dtype = hidden_states[0].dtype
 
-        # 在聚合前对每层应用 layer norm（不可训练）
-        # 使用 F.layer_norm 以避免引入可训练参数
-        # Force float32 for layer_norm
+        # F.layer_norm 在 AMP 下自动处理精度，无需手动转换
         normalized_hidden_states = [
-            F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.feature_dim,))
+            F.layer_norm(h, normalized_shape=(self.feature_dim,))
             for h in hidden_states
         ]
 
-        # 堆叠隐藏状态: (num_layers, batch_size, seq_len, feature_dim)
-        # 保持 float32 精度进行后续计算
         stacked_hidden_states = torch.stack(normalized_hidden_states, dim=0)
 
-        # 生成时序权重
-        # 获取 weight_generator 的权重 dtype（由 DeepSpeed 管理，可能是 bfloat16）
-        weight_generator_dtype = next(self.weight_generator.parameters()).dtype
-        t_embed = self._time_embedding(timesteps)  # float32
-        # 将 t_embed 转换为与 weight_generator 相同的 dtype，让 DeepSpeed 管理精度
-        weight_logits = self.weight_generator(t_embed.to(weight_generator_dtype))
-        # 显式确保 Softmax 在 float32 下执行，避免精度问题
-        weights = F.softmax(weight_logits.float(), dim=-1)
+        # 时间嵌入
+        t_embed = self._time_embedding(timesteps)
+        weight_logits = self.weight_generator(t_embed.to(dtype))
+        # F.softmax 在 AMP 下自动处理精度，无需手动转换
+        weights = F.softmax(weight_logits, dim=-1)
 
-        # 加权求和 (在 float32 下进行，避免累加误差)
+        # 加权求和
         broadcastable_weights = weights.T.unsqueeze(-1).unsqueeze(-1)
         weighted_states = stacked_hidden_states * broadcastable_weights
         combined_features = torch.sum(weighted_states, dim=0)
 
-        # 转回原始 dtype
-        return combined_features.to(dtype), weights
+        return combined_features, weights
 
 
 def get_llm(model: str, base_config: PretrainedConfig):
@@ -638,11 +608,11 @@ class AdaFuseDiT(PreTrainedModel):
                 # 先对每层进行 layer norm（不可训练）
                 # Force float32 for layer_norm
                 normalized_hidden_states = [
-                    F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.config.text_hidden_size,))
+                    F.layer_norm(h, normalized_shape=(self.config.text_hidden_size,))
                     for h in text_hidden_states
                 ]
                 # Force float32 for softmax
-                weights = F.softmax(self.text_fusion_weights[layer_idx].float(), dim=0)
+                weights = F.softmax(self.text_fusion_weights[layer_idx], dim=0)
                 stacked = torch.stack(normalized_hidden_states, dim=0)
                 fused_text = torch.sum(
                     stacked * weights.view(-1, 1, 1, 1),
@@ -662,11 +632,11 @@ class AdaFuseDiT(PreTrainedModel):
                 # 先对每层进行 layer norm（不可训练）
                 # Force float32 for layer_norm
                 normalized_hidden_states = [
-                    F.layer_norm(h.to(dtype=torch.float32), normalized_shape=(self.config.text_hidden_size,))
+                    F.layer_norm(h, normalized_shape=(self.config.text_hidden_size,))
                     for h in text_hidden_states
                 ]
                 # Force float32 for softmax
-                weights = F.softmax(self.text_fusion_weight.float(), dim=0)
+                weights = F.softmax(self.text_fusion_weight, dim=0)
                 stacked = torch.stack(normalized_hidden_states, dim=0)
                 fused_text = torch.sum(
                     stacked * weights.view(-1, 1, 1, 1),

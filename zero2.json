@@ -11,7 +11,7 @@
     }
   },
   "bf16": {
-    "enabled": "auto"
+    "enabled": true
   },
   "gradient_clipping": "auto",
   "zero_optimization": {
