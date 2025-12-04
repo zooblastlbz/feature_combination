@@ -770,7 +770,7 @@ class AdaFuseDiT(PreTrainedModel):
             # 映射到 DiT 的隐藏维度
             # Force float32 for context_embedder
             dtype = fused_text.dtype
-            fused_text = self.context_embedder(fused_text.to(dtype=torch.float32)).to(dtype)
+            fused_text = self.context_embedder(fused_text).to(dtype)
             
             # 执行 DiT 层
             if self.gradient_checkpointing and self.training:
