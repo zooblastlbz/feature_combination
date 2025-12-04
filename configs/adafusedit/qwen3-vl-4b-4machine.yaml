@@ -1,6 +1,6 @@
 trainer:
   cache_dir: "../.cache/torch_xla"
-  checkpoint_dir: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise"
+  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-DiT-baseline"
   checkpointing_steps: 5000
   consolidation_steps: 50000
   enable_gradient_checkpointing: false
@@ -16,7 +16,7 @@ trainer:
   precondition_outputs: false
   project: "AdaFuseDiT"
   resume_from: null
-  run: "256-AdaFuseDiT-time-wise"
+  run: "256-DiT-baseline"
   seed: 42
   train_dit: true
   train_llm: false
@@ -27,7 +27,7 @@ model:
   base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/"
   dit_num_hidden_layers: 18
   encoder_type: "llm"
-  name: "AdaFuseDiT"
+  name: "DiT"
   patch_size: 2
   pos_embed: "1d-rope"
   qk_norm: true
@@ -37,7 +37,7 @@ model:
   # === AdaFuseDiT 特有配置 ===
   # 模式 4: 每层独立时间自适应权重（最灵活）
   text_hidden_states_num: 36             # 使用最后 4 层文本特征
-  use_timestep_adaptive_fusion: true     # 启用时间自适应融合
+  use_timestep_adaptive_fusion: false     # 启用时间自适应融合
   use_layer_wise_fusion: false            # 每层独立融合
   adaptive_fusion_time_embed_dim: 128    # 时间嵌入维度
 
