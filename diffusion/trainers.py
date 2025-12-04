@@ -178,7 +178,7 @@ class Trainer(ABC):
 
         sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-
+        noisy_model_input = noisy_model_input.to(dtype=self.train_dtype)
         output = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.device),
@@ -242,7 +242,7 @@ class Trainer(ABC):
 
         sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
-
+        noisy_model_input = noisy_model_input.to(dtype=self.train_dtype)
         output = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.device),
@@ -330,6 +330,7 @@ class Trainer(ABC):
 
         sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.device)
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
+        noisy_model_input = noisy_model_input.to(dtype=self.train_dtype)
 
         model_pred = self.model(
             hidden_states=noisy_model_input,
@@ -621,7 +622,14 @@ class DeepSpeedTrainer(Trainer):
 
         # 设置训练精度
         self.train_dtype = torch.bfloat16 if hparams.trainer.mixed_precision == "bf16" else torch.float32
-
+        if hparams.trainer.mixed_precision == "fp16":
+            self.train_dtype = torch.float16
+        elif hparams.trainer.mixed_precision == "fp32":
+            self.train_dtype = torch.float32
+        elif hparams.trainer.mixed_precision == "bf16":
+            self.train_dtype = torch.bfloat16
+        else:
+            raise ValueError(f"Unknown mixed precision: {hparams.trainer.mixed_precision}")
         deepspeed.init_distributed()
         deepspeed.get_accelerator().set_device(local_rank)
         self.device = torch.device(deepspeed.get_accelerator().device_name(), local_rank)
