@@ -1,11 +1,9 @@
-from functools import partial
 import random
 import json
 from pathlib import Path
 import os
 
 from datasets import load_dataset
-from diffusers.utils import is_torch_xla_available
 import numpy as np
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -13,46 +11,17 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset
 from torchvision import transforms
-from transformers import CLIPTokenizer, AutoTokenizer
-import webdataset as wds
+from transformers import AutoTokenizer
 
 
 def _get_process_rank():
+    """获取当前进程的 rank"""
     try:
-        if is_torch_xla_available():
-            import torch_xla.core.xla_model as xm
-            return int(xm.get_ordinal())
         if dist.is_available() and dist.is_initialized():
             return int(dist.get_rank())
     except Exception:
         pass
     return int(os.environ.get("RANK", "0"))
-
-
-class InfiniteDataLoader:
-    """
-    无限循环的 DataLoader 包装器
-    用于支持多 epoch 训练，当一个 epoch 结束后自动开始下一个 epoch
-    """
-    def __init__(self, dataloader):
-        self.dataloader = dataloader
-        self.iterator = None
-        
-    def __iter__(self):
-        return self
-    
-    def __next__(self):
-        if self.iterator is None:
-            self.iterator = iter(self.dataloader)
-        
-        try:
-            batch = next(self.iterator)
-            return batch
-        except StopIteration:
-            # 一个 epoch 结束，重新开始
-            self.iterator = iter(self.dataloader)
-            batch = next(self.iterator)
-            return batch
 
 
 class LocalImageTextDataset(Dataset):
@@ -67,16 +36,6 @@ class LocalImageTextDataset(Dataset):
     ]
     
     可以通过 hparams.data.image_key 和 hparams.data.text_key 自定义键名
-    
-    使用 datasets 库的优势：
-    - 自动缓存和内存映射
-    - 支持流式加载大型数据集
-    - 更好的性能和内存管理
-    
-    错误处理策略：
-    - 重试加载失败的图像
-    - 如果失败，随机选择替代样本
-    - 最终 fallback 使用灰色占位符图像
     """
     def __init__(self, json_path, hparams, tokenizer, image_root=None):
         """
@@ -94,7 +53,7 @@ class LocalImageTextDataset(Dataset):
         self.image_key = getattr(hparams.data, 'image_key', 'image')
         self.text_key = getattr(hparams.data, 'text_key', 'text')
         
-        # 🔥 错误处理配置
+        # 错误处理配置
         self.max_load_attempts = getattr(hparams.data, 'max_load_attempts', 5)
         self.log_errors = getattr(hparams.data, 'log_image_errors', True)
         
@@ -105,7 +64,6 @@ class LocalImageTextDataset(Dataset):
         print(f"✅ 成功加载 {len(self.dataset)} 个样本从 {json_path}")
         print(f"📌 使用键名: image_key='{self.image_key}', text_key='{self.text_key}'")
         print(f"📊 数据集特征: {self.dataset.column_names}")
-        print(f"🛡️ 错误处理: 最大尝试次数={self.max_load_attempts}, 记录错误={self.log_errors}")
         
         # 验证数据集是否包含指定的键
         if self.image_key not in self.dataset.column_names:
@@ -143,29 +101,14 @@ class LocalImageTextDataset(Dataset):
         return len(self.dataset)
     
     def _load_image_robust(self, image_path):
-        """
-        鲁棒的图像加载方法
-        
-        Args:
-            image_path: 图像路径
-        
-        Returns:
-            PIL.Image 或 None（如果加载失败）
-        """
+        """鲁棒的图像加载方法"""
         try:
-            # 检查文件是否存在
             if not Path(image_path).exists():
                 return None, f"文件不存在: {image_path}"
             
-            # 尝试打开图像
             image = Image.open(image_path)
-            
-            # 验证图像是否损坏（尝试加载数据）
             image.load()
-            
-            # 转换为 RGB
             image = image.convert('RGB')
-            
             return image, None
             
         except Exception as e:
@@ -180,12 +123,10 @@ class LocalImageTextDataset(Dataset):
             with open(self.error_log_path, 'a') as f:
                 f.write(f"{idx}\t{image_path}\t{error_msg}\n")
         except Exception:
-            pass  # 日志写入失败不影响训练
+            pass
     
     def _create_placeholder_image(self):
-        """创建灰色占位符图像（比黑色更好）"""
-        # 使用中性灰色 (128, 128, 128) 而不是纯黑 (0, 0, 0)
-        # 这样对训练的负面影响更小
+        """创建灰色占位符图像"""
         return Image.new(
             'RGB', 
             (self.hparams.data.resolution, self.hparams.data.resolution), 
@@ -197,78 +138,58 @@ class LocalImageTextDataset(Dataset):
         image = None
         item = None
         
-        # 🔥 方案1：重试 + 随机替代
         for attempt in range(self.max_load_attempts):
             try:
-                # 使用 datasets 获取样本
                 item = self.dataset[idx]
                 
-                # 使用配置的键名加载图像
                 image_path = item[self.image_key]
                 if self.image_root:
                     image_path = self.image_root / image_path
                 else:
                     image_path = Path(image_path)
                 
-                # 尝试加载图像
                 image, error = self._load_image_robust(image_path)
                 
                 if image is not None:
-                    # 成功加载，跳出循环
                     break
                 else:
-                    # 加载失败
                     self.error_count += 1
                     
-                    # 记录错误（仅第一次尝试时记录原始索引）
                     if attempt == 0:
                         self._log_error(original_idx, str(image_path), error)
                     
                     if attempt < self.max_load_attempts - 1:
-                        # 还有重试机会，随机选择另一个样本
                         idx = random.randint(0, len(self.dataset) - 1)
-                        if attempt == 0:  # 只在第一次失败时打印
+                        if attempt == 0:
                             print(f"⚠️ [{self.error_count}] 无法加载图像 {image_path}: {error}")
-                            print(f"   ↳ 尝试替代样本 idx={idx}（第 {attempt + 1}/{self.max_load_attempts - 1} 次重试）")
                     else:
-                        # 所有尝试都失败，使用占位符
-                        print(f"   ↳ 所有尝试失败，使用灰色占位符图像")
                         image = self._create_placeholder_image()
-                        # 使用原始样本的文本
                         item = self.dataset[original_idx]
                         break
                         
             except Exception as e:
-                # 其他未预期的错误
                 self.error_count += 1
                 print(f"❌ 处理样本 {idx} 时发生未预期错误: {e}")
                 
                 if attempt < self.max_load_attempts - 1:
-                    # 随机选择另一个样本
                     idx = random.randint(0, len(self.dataset) - 1)
                 else:
-                    # 最后的 fallback
                     image = self._create_placeholder_image()
                     item = self.dataset[original_idx]
                     break
         
-        # 如果最终还是没有图像（不应该发生，但作为保险）
         if image is None:
-            print(f"⚠️ 样本 {original_idx} 最终未能加载，使用灰色占位符")
             image = self._create_placeholder_image()
             item = self.dataset[original_idx]
         
-        # 应用图像变换
         pixel_values = self.transform(image)
         
-        # 使用配置的键名获取文本
-        caption = str(item[self.text_key])  # 确保是字符串类型
+        caption = str(item[self.text_key])
         
         # 随机丢弃 caption（用于 CFG 训练）
         if random.random() < self.hparams.data.random_dropping_rate:
             caption = ""
         else:
-            # 添加 instruction 前缀
             instruction = getattr(self.hparams.data, 'instruction', '')
             caption = instruction + caption
         
@@ -303,15 +224,32 @@ class LocalImageTextDataset(Dataset):
         }
 
 
-def get_local_json_dataloader(hparams, *args, **kwargs):
+def collate_fn(examples):
+    """数据集 collate 函数"""
+    pixel_values = [example["pixel_values"] for example in examples]
+    pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
+    input_ids = [example["input_ids"] for example in examples]
+    input_ids = torch.cat(input_ids).to(memory_format=torch.contiguous_format)
+    attention_mask = [example["attention_mask"] for example in examples]
+    attention_mask = torch.cat(attention_mask).to(memory_format=torch.contiguous_format)
+
+    return {
+        "pixel_values": pixel_values,
+        "input_ids": input_ids,
+        "attention_mask": attention_mask
+    }
+
+
+def get_dataloader(hparams):
     """
     创建本地 JSON 数据集的 DataLoader
     
-    在 YAML 配置文件中添加:
+    在 YAML 配置文件中设置:
     data:
-      data_path: "path/to/your/data.json"  # JSON 文件路径
-      image_root: "path/to/images"          # 可选，图像根目录
-      use_local_json: true                  # 启用本地 JSON 加载
+      data_path: "path/to/your/data.json"
+      image_root: "path/to/images"  # 可选
+      image_key: "image"
+      text_key: "text"
     """
     tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer)
     
@@ -327,16 +265,20 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
             return_dict=True,
         )["input_ids"].shape[1] - 1
     else:
-        hparams.data.instruction_length = tokenizer(
-            hparams.data.instruction.rstrip(),
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=hparams.data.max_prompt_length,
-        ).input_ids.shape[1] - 1
+        instruction = getattr(hparams.data, 'instruction', '')
+        if instruction:
+            hparams.data.instruction_length = tokenizer(
+                instruction.rstrip(),
+                return_tensors="pt",
+                padding=False,
+                truncation=True,
+                max_length=hparams.data.max_prompt_length,
+            ).input_ids.shape[1] - 1
+        else:
+            hparams.data.instruction_length = 0
     
     # 创建数据集
-    image_root = hparams.data.image_root if hasattr(hparams.data, 'image_root') else None
+    image_root = getattr(hparams.data, 'image_root', None)
     dataset = LocalImageTextDataset(
         json_path=hparams.data.data_path,
         hparams=hparams,
@@ -349,285 +291,20 @@ def get_local_json_dataloader(hparams, *args, **kwargs):
         random.seed(worker_seed)
         np.random.seed(worker_seed)
     
-    # 使用独立的 Generator，并对不同 rank 偏移 seed，避免分布式下重复顺序
     g = torch.Generator()
     g.manual_seed(int(hparams.trainer.seed) + _get_process_rank())
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=hparams.data.batch_size,
-        shuffle=True,  # 本地数据集需要手动 shuffle
-        collate_fn=llm_collate_fn,
+        shuffle=True,
+        collate_fn=collate_fn,
         num_workers=hparams.data.dataloader_num_workers,
         generator=g,
         worker_init_fn=seed_worker,
-        pin_memory=False if is_torch_xla_available() else True,
-        drop_last=True,  # 丢弃最后不完整的 batch
+        pin_memory=True,
+        drop_last=True,
     )
     
-    # 🔥 关键修复：包装成无限循环的 DataLoader
-    print("✅ 使用 InfiniteDataLoader 包装，支持多 epoch 训练")
-    return InfiniteDataLoader(dataloader)
-
-
-def llm_preprocess_fn(hparams, tokenizer, sample):
-    image = sample[hparams.data.image_column]
-
-    if hparams.data.original_caption_rate > 0 and sample.get(hparams.data.caption_column.original) is not None and random.random() < hparams.data.original_caption_rate:
-        caption = sample[hparams.data.caption_column.original]
-    else:
-        caption = sample[hparams.data.caption_column.synthetic]
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize(hparams.data.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            (transforms.CenterCrop(hparams.data.resolution) if hparams.data.center_crop else transforms.RandomCrop(hparams.data.resolution)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-    pixel_values = transform(image)
-
-    if random.random() < hparams.data.random_dropping_rate: # Randomly drop the caption
-        caption = ""
-    else:
-        caption = hparams.data.instruction + caption
-
-    if hparams.data.apply_chat_template and caption != "":
-        tokenized = tokenizer.apply_chat_template(
-            [{ "role": "user", "content": caption }],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=hparams.data.max_prompt_length + hparams.data.instruction_length,
-            add_generation_prompt=hparams.data.add_generation_prompt,
-            return_dict=True,
-        )
-        input_ids = tokenized["input_ids"]
-        attention_mask = tokenized["attention_mask"]
-    else:
-        tokenized = tokenizer(
-            caption,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=hparams.data.max_prompt_length + hparams.data.instruction_length,
-        )
-        input_ids = tokenized.input_ids
-        attention_mask = tokenized.attention_mask
-
-    return {
-        "pixel_values": pixel_values,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-    }
-
-
-def llm_collate_fn(examples):
-    pixel_values = [example["pixel_values"] for example in examples]
-    pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
-    input_ids = [example["input_ids"] for example in examples]
-    input_ids = torch.cat(input_ids).to(memory_format=torch.contiguous_format)
-    attention_mask = [example["attention_mask"] for example in examples]
-    attention_mask = torch.cat(attention_mask).to(memory_format=torch.contiguous_format)
-
-    return {
-        "pixel_values": pixel_values,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask
-    }
-
-
-def get_llm_dataloader(hparams, *args, **kwargs):
-    tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer)
-
-    if hparams.data.apply_chat_template:
-        hparams.data.instruction_length = tokenizer.apply_chat_template(
-            [{ "role": "user", "content": hparams.data.instruction.rstrip() }],
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=hparams.data.max_prompt_length,
-            add_generation_prompt=hparams.data.add_generation_prompt,
-            return_dict=True,
-        )["input_ids"].shape[1] - 1
-    else:
-        hparams.data.instruction_length = tokenizer(
-            hparams.data.instruction.rstrip(),
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=hparams.data.max_prompt_length,
-        ).input_ids.shape[1] - 1
-
-    # 使 shuffle 在不同进程使用不同 rng，避免重复
-    rank = _get_process_rank()
-    rng = random.Random(int(hparams.trainer.seed) + rank)
-
-    dataset = (
-        wds.WebDataset(wds.ResampledShards(hparams.data.data_path, deterministic=True))
-            .shuffle(1000, rng=rng)
-            .decode("pil")
-            .map(
-                partial(
-                    llm_preprocess_fn,
-                    hparams,
-                    tokenizer,
-                ),
-            )
-    )
-
-    def seed_worker(worker_id):
-        worker_seed = torch.initial_seed() % (2 ** 32)
-        random.seed(worker_seed)
-        np.random.seed(worker_seed)
-
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=hparams.data.batch_size,
-        collate_fn=llm_collate_fn,
-        num_workers=hparams.data.dataloader_num_workers,
-        generator=torch.manual_seed(int(hparams.trainer.seed) + rank),
-        worker_init_fn=seed_worker,
-        pin_memory=False if is_torch_xla_available() else True,
-        prefetch_factor=8,
-    )
-
-
-def clip_llm_preprocess_fn(hparams, clip_tokenizer, tokenizer, sample):
-    image = sample[hparams.data.image_column]
-
-    if hparams.data.original_caption_rate > 0 and sample.get(hparams.data.caption_column.original) is not None and random.random() < hparams.data.original_caption_rate:
-        caption = sample[hparams.data.caption_column.original]
-    else:
-        caption = sample[hparams.data.caption_column.synthetic]
-
-    transform = transforms.Compose(
-        [
-            transforms.Resize(hparams.data.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            (transforms.CenterCrop(hparams.data.resolution) if hparams.data.center_crop else transforms.RandomCrop(hparams.data.resolution)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-    pixel_values = transform(image)
-
-    if random.random() < hparams.data.random_dropping_rate: # Randomly drop the caption
-        caption = ""
-    else:
-        caption = hparams.data.instruction + caption
-
-    clip_input_ids = clip_tokenizer(
-        caption,
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=77,
-    ).input_ids
-
-    if hparams.data.apply_chat_template and caption != "":
-        tokenized = tokenizer.apply_chat_template(
-            [{ "role": "user", "content": caption }],
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=hparams.data.max_prompt_length + hparams.data.instruction_length,
-            add_generation_prompt=hparams.data.add_generation_prompt,
-            return_dict=True,
-        )
-        input_ids = tokenized["input_ids"]
-        attention_mask = tokenized["attention_mask"]
-    else:
-        tokenized = tokenizer(
-            caption,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=hparams.data.max_prompt_length + hparams.data.instruction_length,
-        )
-        input_ids = tokenized.input_ids
-        attention_mask = tokenized.attention_mask
-
-    return {
-        "pixel_values": pixel_values,
-        "clip_input_ids": clip_input_ids,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-    }
-
-
-def clip_llm_collate_fn(examples):
-    pixel_values = [example["pixel_values"] for example in examples]
-    pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
-    clip_input_ids = [example["clip_input_ids"] for example in examples]
-    clip_input_ids = torch.cat(clip_input_ids).to(memory_format=torch.contiguous_format)
-    input_ids = [example["input_ids"] for example in examples]
-    input_ids = torch.cat(input_ids).to(memory_format=torch.contiguous_format)
-    attention_mask = [example["attention_mask"] for example in examples]
-    attention_mask = torch.cat(attention_mask).to(memory_format=torch.contiguous_format)
-
-    return {
-        "pixel_values": pixel_values,
-        "clip_input_ids": clip_input_ids,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask
-    }
-
-
-def get_clip_llm_dataloader(hparams, *args, **kwargs):
-    clip_tokenizer = CLIPTokenizer.from_pretrained(**hparams.data.tokenizer.clip)
-    tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer.llm)
-
-    hparams.data.instruction_length = tokenizer(
-        hparams.data.instruction.rstrip(),
-        return_tensors="pt",
-        padding=False,
-        truncation=True,
-        max_length=hparams.data.max_prompt_length,
-    ).input_ids.shape[1] - 1
-
-    rank = _get_process_rank()
-    rng = random.Random(int(hparams.trainer.seed) + rank)
-
-    dataset = (
-        wds.WebDataset(wds.ResampledShards(hparams.data.data_path, deterministic=True))
-            .shuffle(1000, rng=rng)
-            .decode("pil")
-            .map(
-                partial(
-                    clip_llm_preprocess_fn,
-                    hparams,
-                    clip_tokenizer,
-                    tokenizer,
-                ),
-            )
-    )
-
-    def seed_worker(worker_id):
-        worker_seed = torch.initial_seed() % (2 ** 32)
-        random.seed(worker_seed)
-        np.random.seed(worker_seed)
-
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=hparams.data.batch_size,
-        collate_fn=clip_llm_collate_fn,
-        num_workers=hparams.data.dataloader_num_workers,
-        generator=torch.manual_seed(int(hparams.trainer.seed) + rank),
-        worker_init_fn=seed_worker,
-        pin_memory=False if is_torch_xla_available() else True,
-        prefetch_factor=8,
-    )
-
-
-def get_dataloader(hparams, *args, **kwargs):
-    # 检查是否使用本地 JSON 数据集
-    if hasattr(hparams.data, 'use_local_json') and hparams.data.use_local_json:
-        return get_local_json_dataloader(hparams, *args, **kwargs)
-    
-    if hparams.model.encoder_type == "clip-llm":
-        return get_clip_llm_dataloader(hparams, *args, **kwargs)
-    elif hparams.model.encoder_type == "llm":
-        return get_llm_dataloader(hparams, *args, **kwargs)
-    else:
-        raise ValueError(f"Invalid encoder_type: {hparams.model.encoder_type}")
+    print(f"✅ DataLoader 创建完成，共 {len(dataloader)} 个 batch")
+    return dataloader

@@ -35,3 +35,4 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 http_proxy=http://oversea-squid2.ko.txyun:11080 
 https_proxy=http://oversea-squid2.ko.txyun:11080 
 no_proxy=localhost,127.0.0.1,localaddress,localdomain.com,internal,corp.kuaishou.com,test.gifshow.com,staging.kuaishou.com
+WANDB_API_KEY=c091a3f754adb7c44dbca6252e7f35ee202b87ef

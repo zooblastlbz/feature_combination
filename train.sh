@@ -5,30 +5,32 @@ export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 mpirun --hostfile /etc/mpi/hostfile --pernode -x PATH sh -c 'rm -f /dev/shm/nccl-*'
 
-
 export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
-# 针对8机64卡配置调整slots
-#num_slots=8  # 每个节点8张卡
-#sed -i "s/slots=[0-9]\+\$/slots=$num_slots/g" /etc/mpi/hostfile
 
-# NCCL网络和调试配置
-rm .deepspeed_env
-cp /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/env_h800 /root/.deepspeed_env
-
-
-HOSTFILE=/etc/mpi/hostfile
-
+# ===== Accelerate + DeepSpeed ZeRO-2 多机多卡配置 =====
 NNODES=8
 NPROC_PER_NODE=8
-DEEPSPEED_CONFIG=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/zero2.json
+MIXED_PRECISION="bf16"
 
-# 🔥 导出 DEEPSPEED_CONFIG 环境变量，让训练代码能够读取
-export DEEPSPEED_CONFIG=${DEEPSPEED_CONFIG}
+# 从 hostfile 获取主节点地址
+HOSTFILE=/etc/mpi/hostfile
+MASTER_ADDR=$(head -n 1 ${HOSTFILE} | cut -d' ' -f1)
+MASTER_PORT=29500
 
-/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin/deepspeed \
-  --hostfile ${HOSTFILE} \
-  --num_nodes ${NNODES} \
-  --num_gpus ${NPROC_PER_NODE} \
+# 配置文件路径
+CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml
+ACCELERATE_CONFIG=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/accelerate_config.yaml
+
+# Python 环境
+PYTHON_BIN=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin
+
+# 使用 accelerate launch + DeepSpeed ZeRO-2 启动多机多卡训练
+${PYTHON_BIN}/accelerate launch \
+    --config_file ${ACCELERATE_CONFIG} \
+    --num_machines ${NNODES} \
+    --num_processes $((NNODES * NPROC_PER_NODE)) \
+    --main_process_ip ${MASTER_ADDR} \
+    --main_process_port ${MASTER_PORT} \
+    --machine_rank ${RANK:-0} \
     train.py \
-    -c /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml \
-    --deepspeed_config ${DEEPSPEED_CONFIG}
+    -c ${CONFIG_FILE}
