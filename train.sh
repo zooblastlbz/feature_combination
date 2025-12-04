@@ -7,8 +7,8 @@ mpirun --hostfile /etc/mpi/hostfile --pernode -x PATH sh -c 'rm -f /dev/shm/nccl
 
 export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
 
-
-
+rm .deepspeed_env
+cp /ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/env_h800 /root/.deepspeed_env
 
 
 # 配置文件路径
