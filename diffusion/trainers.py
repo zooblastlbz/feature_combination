@@ -399,7 +399,7 @@ class AccelerateTrainer(Trainer):
         self.hparams = hparams
         self.global_step = 0
 
-        # 1. 创建 Accelerator
+        # 1. 创建 Accelerator（必须最先创建）
         project_config = ProjectConfiguration(
             project_dir=hparams.trainer.checkpoint_dir,
             logging_dir=os.path.join(hparams.trainer.checkpoint_dir, "logs")
@@ -416,88 +416,131 @@ class AccelerateTrainer(Trainer):
             project_config=project_config,
         )
 
+        # 2. 设置随机种子
         if hparams.trainer.seed is not None:
             set_seed(hparams.trainer.seed)
 
+        # 3. 设置权重数据类型
         self.weight_dtype = torch.float32
         if self.accelerator.mixed_precision == "fp16":
             self.weight_dtype = torch.float16
         elif self.accelerator.mixed_precision == "bf16":
             self.weight_dtype = torch.bfloat16
 
+        # 4. 计算总 batch size
         self.total_batch_size = (
             hparams.data.batch_size * 
             self.accelerator.num_processes * 
             hparams.trainer.gradient_accumulation_steps
         )
 
+        # 5. 只在主进程打印初始化信息
+        if self.accelerator.is_main_process:
+            print(f"🚀 开始初始化 AccelerateTrainer...")
+            print(f"  - 进程数: {self.accelerator.num_processes}")
+            print(f"  - 混合精度: {self.accelerator.mixed_precision}")
+
+        # 6. 构建模型（在 prepare 之前，但不移动到设备）
+        if self.accelerator.is_main_process:
+            print(f"📦 构建模型...")
         self.model = build_model(hparams)
         self.model.train()
         
         if hparams.trainer.enable_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if hparams.ema.update_steps is not None:
-            self.ema = deepcopy(self.model)
-            self.ema.requires_grad_(False)
-        else:
-            self.ema = None
-
-        self.vae = AutoencoderKL.from_pretrained(**hparams.vae)
-        self.vae.requires_grad_(False)
-        self.vae.to(self.accelerator.device, dtype=torch.float32)
-
-        if hparams.model.name == "DiT":
-            if hparams.model.encoder_type == "llm":
-                self.llm = get_llm(hparams.model.base, self.model.config.base_config)
-                self.llm.requires_grad_(False)
-                self.llm.to(self.accelerator.device, dtype=self.weight_dtype)
-            else:
-                raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
-            self.training_step = self.dit_training_step
-            
-        elif hparams.model.name == "AdaFuseDiT":
-            if hparams.model.encoder_type == "llm":
-                self.llm = get_llm(hparams.model.base, self.model.config.base_config)
-                self.llm.requires_grad_(False)
-                self.llm.to(self.accelerator.device, dtype=self.weight_dtype)
-            else:
-                raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
-            self.training_step = self.adafusedit_training_step
-            
-        elif hparams.model.name == "FuseDiT":
-            if hparams.model.encoder_type == "clip-llm":
-                self.clip = CLIPTextModelWithProjection.from_pretrained(**hparams.clip_l)
-                self.clip.requires_grad_(False)
-                self.clip.to(self.accelerator.device, dtype=self.weight_dtype)
-            self.training_step = self.fusedit_training_step
-        else:
-            raise ValueError(f"Unknown model name: {hparams.model.name}")
-
-        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(**hparams.noise_scheduler)
-
+        # 7. 创建优化器（在 prepare 之前）
         self.optimizer = torch.optim.AdamW(
             self.model.trainable_parameters(), 
             **hparams.optimizer
         )
 
+        # 8. 创建学习率调度器
         self.lr_scheduler = get_scheduler(
             **hparams.lr_scheduler, 
             optimizer=self.optimizer, 
             num_training_steps=hparams.trainer.max_steps * hparams.trainer.gradient_accumulation_steps
         )
 
+        # 9. 创建数据加载器（只在主进程打印）
+        if self.accelerator.is_main_process:
+            print(f"📚 加载数据集...")
         self.train_dataloader = get_dataloader(hparams)
 
+        # 10. 使用 accelerator.prepare() 包装（关键步骤）
+        if self.accelerator.is_main_process:
+            print(f"⚙️ 准备分布式训练...")
         self.model, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
 
-        if self.ema is not None:
-            self.ema.to(self.accelerator.device)
+        # 11. prepare 之后再加载 frozen 模型到正确的设备
+        device = self.accelerator.device
+        if self.accelerator.is_main_process:
+            print(f"📦 加载 VAE 到 {device}...")
+        self.vae = AutoencoderKL.from_pretrained(**hparams.vae)
+        self.vae.requires_grad_(False)
+        self.vae.eval()
+        self.vae.to(device, dtype=torch.float32)
 
+        # 12. 根据模型类型加载 LLM/CLIP
+        if hparams.model.name == "DiT":
+            if hparams.model.encoder_type == "llm":
+                if self.accelerator.is_main_process:
+                    print(f"📦 加载 LLM 到 {device}...")
+                self.llm = get_llm(hparams.model.base, self.accelerator.unwrap_model(self.model).config.base_config)
+                self.llm.requires_grad_(False)
+                self.llm.eval()
+                self.llm.to(device, dtype=self.weight_dtype)
+            else:
+                raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
+            self.training_step = self.dit_training_step
+            
+        elif hparams.model.name == "AdaFuseDiT":
+            if hparams.model.encoder_type == "llm":
+                if self.accelerator.is_main_process:
+                    print(f"📦 加载 LLM 到 {device}...")
+                self.llm = get_llm(hparams.model.base, self.accelerator.unwrap_model(self.model).config.base_config)
+                self.llm.requires_grad_(False)
+                self.llm.eval()
+                self.llm.to(device, dtype=self.weight_dtype)
+            else:
+                raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
+            self.training_step = self.adafusedit_training_step
+            
+        elif hparams.model.name == "FuseDiT":
+            if hparams.model.encoder_type == "clip-llm":
+                if self.accelerator.is_main_process:
+                    print(f"📦 加载 CLIP 到 {device}...")
+                self.clip = CLIPTextModelWithProjection.from_pretrained(**hparams.clip_l)
+                self.clip.requires_grad_(False)
+                self.clip.eval()
+                self.clip.to(device, dtype=self.weight_dtype)
+            self.training_step = self.fusedit_training_step
+        else:
+            raise ValueError(f"Unknown model name: {hparams.model.name}")
+
+        # 13. 加载 Noise Scheduler（CPU 上即可）
+        self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(**hparams.noise_scheduler)
+
+        # 14. 创建 EMA 模型（在 prepare 之后，避免 deepcopy 未包装的模型）
+        if hparams.ema.update_steps is not None:
+            if self.accelerator.is_main_process:
+                print(f"📦 创建 EMA 模型...")
+            # 使用 unwrap_model 获取原始模型再 deepcopy
+            self.ema = deepcopy(self.accelerator.unwrap_model(self.model))
+            self.ema.requires_grad_(False)
+            self.ema.to(device)
+        else:
+            self.ema = None
+
+        # 15. 同步所有进程
+        self.accelerator.wait_for_everyone()
+
+        # 16. 加载 checkpoint（如果存在）
         self.load_checkpoint()
 
+        # 17. 打印完成信息
         if self.accelerator.is_main_process:
             print(f"✅ AccelerateTrainer 初始化完成")
             print(f"  - 设备: {self.accelerator.device}")
