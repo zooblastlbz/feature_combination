@@ -29,6 +29,8 @@ from transformers.models.gemma.modeling_gemma import (
     GemmaRotaryEmbedding,
     repeat_kv,
 )
+from torch.nn import RMSNorm
+
 
 from .configs import DiTConfig, FuseDiTConfig
 from .modules import AdaLayerNormOut, DiTLayer
@@ -69,6 +71,10 @@ class TimestepWiseFeatureWeighting(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, num_layers),
         )
+
+                # 零初始化最后一层，使初始权重经过 softmax 后接近均匀分布
+        nn.init.zeros_(self.weight_generator[-1].weight)
+        nn.init.zeros_(self.weight_generator[-1].bias)
 
     def _time_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         """
@@ -264,21 +270,21 @@ class DiT(PreTrainedModel):
 
         if config.text_modulation_embeds_dim is not None:
             self.condition_embedder = nn.Sequential(
-                GemmaRMSNorm(config.text_modulation_embeds_dim, eps=config.base_config.rms_norm_eps),
+                RMSNorm(config.text_modulation_embeds_dim, eps=config.base_config.rms_norm_eps),
                 nn.Linear(config.text_modulation_embeds_dim, config.dit_hidden_size),
                 nn.SiLU(),
                 nn.Linear(config.dit_hidden_size, config.dit_hidden_size),
             )
         if config.model_type == "DiT":
             self.context_embedder = nn.Sequential(
-                GemmaRMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
+                RMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
                 nn.Linear(config.text_hidden_size, config.dit_hidden_size),
             )
 
         if config.timestep_conditioning == "adaln-zero":
             self.norm_out = AdaLayerNormOut(config)
         else:
-            self.norm_out = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+            self.norm_out = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
         self.proj_out = nn.Linear(
             config.dit_hidden_size,
             config.patch_size * config.patch_size * config.out_channels,
@@ -509,12 +515,11 @@ class AdaFuseDiT(PreTrainedModel):
 
         if config.text_modulation_embeds_dim is not None:
             self.condition_embedder = nn.Sequential(
-                GemmaRMSNorm(config.text_modulation_embeds_dim, eps=config.base_config.rms_norm_eps),
+                RMSNorm(config.text_modulation_embeds_dim, eps=config.base_config.rms_norm_eps),
                 nn.Linear(config.text_modulation_embeds_dim, config.dit_hidden_size),
                 nn.SiLU(),
                 nn.Linear(config.dit_hidden_size, config.dit_hidden_size),
             )
-        
         # === AdaFuseDiT 核心：根据配置创建文本特征融合模块 ===
         if config.text_hidden_states_num > 1:
             if config.use_layer_wise_fusion:
@@ -531,8 +536,9 @@ class AdaFuseDiT(PreTrainedModel):
                     ])
                 else:
                     # 模式 3: 每层独立的可学习权重
+                    # 零初始化，使 softmax(zeros) = 均匀分布
                     self.text_fusion_weights = nn.ParameterList([
-                        nn.Parameter(torch.randn(config.text_hidden_states_num))
+                        nn.Parameter(torch.zeros(config.text_hidden_states_num))
                         for _ in range(config.dit_num_hidden_layers)
                     ])
             else:
@@ -546,20 +552,22 @@ class AdaFuseDiT(PreTrainedModel):
                     )
                 else:
                     # 模式 1: 全局可学习权重
+                    # 零初始化，使 softmax(zeros) = 均匀分布
                     self.text_fusion_weight = nn.Parameter(
-                        torch.randn(config.text_hidden_states_num)
+                        torch.zeros(config.text_hidden_states_num)
                     )
+        
         
         # 用于将组合后的文本特征映射到 DiT 的隐藏维度
         self.context_embedder = nn.Sequential(
-            GemmaRMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
+            RMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
             nn.Linear(config.text_hidden_size, config.dit_hidden_size),
         )
 
         if config.timestep_conditioning == "adaln-zero":
             self.norm_out = AdaLayerNormOut(config)
         else:
-            self.norm_out = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+            self.norm_out = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
         self.proj_out = nn.Linear(
             config.dit_hidden_size,
             config.patch_size * config.patch_size * config.out_channels,
@@ -733,15 +741,24 @@ class AdaFuseDiT(PreTrainedModel):
         )
 
         # 每层独立融合文本特征
-        for layer_idx in range(self.config.dit_num_hidden_layers):
-            # 为当前层融合文本特征
+        if not self.config.use_layer_wise_fusion and text_hidden_states is not None:
+            # 全局融合文本特征
             fused_text = self._fuse_text_features(
                 text_hidden_states,
-                timestep,
-                layer_idx=layer_idx if self.config.use_layer_wise_fusion else None
+                timestep
             )
             if torch.isnan(fused_text).any():
-                raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
+                raise ValueError("Fused text features contain NaN values.")
+        for layer_idx in range(self.config.dit_num_hidden_layers):
+            # 为当前层融合文本特征
+            if self.config.use_layer_wise_fusion and text_hidden_states is not None:
+                fused_text = self._fuse_text_features(
+                    text_hidden_states,
+                    timestep,
+                    layer_idx=layer_idx if self.config.use_layer_wise_fusion else None
+                )
+                if torch.isnan(fused_text).any():
+                    raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
             # 映射到 DiT 的隐藏维度
             # Force float32 for context_embedder
             dtype = fused_text.dtype
