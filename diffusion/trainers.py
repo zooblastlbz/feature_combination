@@ -412,7 +412,14 @@ class SPMDTrainer(Trainer):
 
         # 设置训练精度
         self.train_dtype = torch.bfloat16 if hparams.trainer.mixed_precision == "bf16" else torch.float32
-
+        if hparams.trainer.mixed_precision == "fp16":
+            self.train_dtype = torch.float16
+        elif hparams.trainer.mixed_precision == "fp32":
+            self.train_dtype = torch.float32
+        elif hparams.trainer.mixed_precision == "bf16":
+            self.train_dtype = torch.bfloat16
+        else:
+            raise ValueError(f"Unknown mixed precision: {hparams.trainer.mixed_precision}")
         xr.use_spmd()
         if hparams.trainer.cache_dir is not None:
             try:

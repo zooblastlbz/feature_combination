@@ -146,32 +146,26 @@ class TimestepWiseFeatureWeighting(nn.Module):
 
 
 def get_llm(model: str, base_config: PretrainedConfig):
-    if isinstance(base_config, GemmaConfig):
-        return GemmaForCausalLM.from_pretrained(model).model
-    elif (base_config, Gemma2Config):
-        return Gemma2ForCausalLM.from_pretrained(model).model
-    elif isinstance(base_config, PaliGemmaConfig):
-        return PaliGemmaForConditionalGeneration.from_pretrained(model).language_model.model
-    else:
+
         # Fallbacks to support more encoder families, e.g., Qwen/Qwen-VL
         # 1) Try pure causal LM first
-        try:
-            from transformers import AutoModelForCausalLM
-            lm = AutoModelForCausalLM.from_pretrained(model)
-            return lm.model if hasattr(lm, "model") else lm
-        except Exception:
-            pass
-        # 2) Try vision-language models and extract the language sub-module
-        try:
-            from transformers import AutoModelForImageTextToText
-            vl = AutoModelForImageTextToText.from_pretrained(model)
-            for attr in ["language_model", "text_model", "model"]:
-                if hasattr(vl, attr):
-                    lm = getattr(vl, attr)
-                    return lm.model if hasattr(lm, "model") else lm
-            return vl
-        except Exception as e:
-            raise ValueError(f"Unknown model: {model}") from e
+    try:
+        from transformers import AutoModelForCausalLM
+        lm = AutoModelForCausalLM.from_pretrained(model)
+        return lm.model if hasattr(lm, "model") else lm
+    except Exception:
+        pass
+    # 2) Try vision-language models and extract the language sub-module
+    try:
+        from transformers import AutoModelForImageTextToText
+        vl = AutoModelForImageTextToText.from_pretrained(model)
+        for attr in ["language_model", "text_model", "model"]:
+            if hasattr(vl, attr):
+                lm = getattr(vl, attr)
+                return lm.model if hasattr(lm, "model") else lm
+        return vl
+    except Exception as e:
+        raise ValueError(f"Unknown model: {model}") from e
 
 
 def update_self_attention_mask(llm_attention_mask: torch.LongTensor, dit_sequence_length: int, use_cache: bool, device, dtype):
