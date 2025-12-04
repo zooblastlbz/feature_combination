@@ -1,25 +1,18 @@
-# Accelerate + DeepSpeed ZeRO-2 配置文件
-# 使用方法: accelerate launch --config_file accelerate_config.yaml train.py -c xxx.yaml
-
 compute_environment: LOCAL_MACHINE
-debug: false
 deepspeed_config:
-  deepspeed_multinode_launcher: standard
-  gradient_accumulation_steps: 1
-  gradient_clipping: 1.0
-  offload_optimizer_device: none
-  offload_param_device: none
-  zero3_init_flag: false
-  zero3_save_16bit_model: false
-  zero_stage: 2
+  deepspeed_hostfile: /etc/mpi/hostfile # hostfile的路径
+  #deepspeed_multinode_launcher: MPI  # 使用pdsh
+  deepspeed_config_file: /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/zero2.json
 distributed_type: DEEPSPEED
-downcast_bf16: 'no'
-enable_cpu_affinity: false
+dynamo_config: {}
+fsdp_config: {}
+megatron_lm_config: {}
 machine_rank: 0
+#main_process_ip: '10.252.128.132' # 主机地址
+main_process_port: 0 # 端口
 main_training_function: main
-mixed_precision: bf16
-num_machines: 8
-num_processes: 64
+num_machines: 8 # GPU集群中node节点数
+num_processes: 64  # 总的gpu的数量
 rdzv_backend: static
 same_network: true
 tpu_env: []
