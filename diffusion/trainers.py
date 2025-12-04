@@ -408,14 +408,14 @@ class AccelerateTrainer(Trainer):
         mixed_precision = hparams.trainer.mixed_precision
         if mixed_precision == "fp32":
             mixed_precision = "no"
-        
+        print('1'*100)
         self.accelerator = Accelerator(
             gradient_accumulation_steps=hparams.trainer.gradient_accumulation_steps,
             mixed_precision=mixed_precision,
             log_with="wandb" if is_wandb_available() else None,
             project_config=project_config,
         )
-
+        print('2'*100)
         # 2. 设置随机种子
         if hparams.trainer.seed is not None:
             set_seed(hparams.trainer.seed)

@@ -704,8 +704,12 @@ class AdaFuseDiT(PreTrainedModel):
         patch_size = self.config.patch_size
         height = height // patch_size
         width = width // patch_size
-
+        if torch.isnan(hidden_states).any():
+            raise ValueError("Input hidden_states contains NaN values.")
         hidden_states = self.patch_embed(hidden_states)
+        
+        if torch.isnan(hidden_states).any():
+            raise ValueError("Patched hidden_states contains NaN values.")
 
         if self.config.timestep_conditioning is not None:
             timestep_embed = self.time_proj(timestep).to(hidden_states.dtype)
@@ -736,7 +740,8 @@ class AdaFuseDiT(PreTrainedModel):
                 timestep,
                 layer_idx=layer_idx if self.config.use_layer_wise_fusion else None
             )
-            
+            if torch.isnan(fused_text).any():
+                raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
             # 映射到 DiT 的隐藏维度
             # Force float32 for context_embedder
             dtype = fused_text.dtype
@@ -772,8 +777,10 @@ class AdaFuseDiT(PreTrainedModel):
             hidden_states = hidden_states * (1 + scale[:, None]) + shift[:, None]
         hidden_states = self.proj_out(hidden_states)
 
+        
         output = unpatchify(hidden_states, height, width, patch_size)
-
+        if torch.isnan(output).any():
+            raise ValueError("Output contains NaN values.")
         return output
 
     def initialize_weights(self):
