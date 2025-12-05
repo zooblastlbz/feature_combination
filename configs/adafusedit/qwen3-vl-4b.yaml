@@ -62,15 +62,16 @@ lr_scheduler:
   num_warmup_steps: 0
 
 data:
-  apply_chat_template: false
+  apply_chat_template: true
   batch_size: 8
   center_crop: true
   dataloader_num_workers: 8
   data_path: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/train_data/t2i_train_data_six_filtered.json"
   use_local_json: true
   device_prefetch_size: 16
+  add_generation_prompt: true
 
-  instruction: ""
+  instruction: "Describe this  image."
   loader_prefetch_size: 16
   max_prompt_length: 512
   original_caption_rate: 0.0

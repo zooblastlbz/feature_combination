@@ -652,7 +652,101 @@ class AdaFuseDiT(PreTrainedModel):
                 ).to(dtype)
         
         return fused_text
-
+    def _fuse_text_features(
+        self, 
+        text_hidden_states: list, 
+        timestep: torch.Tensor, 
+        layer_idx: Optional[int] = None
+    ):
+        """
+        统一的文本特征融合接口。
+        """
+        if self.config.text_hidden_states_num == 1:
+            return text_hidden_states[0] if isinstance(text_hidden_states, list) else text_hidden_states
+        
+        dtype = text_hidden_states[0].dtype
+        
+        # 检查输入是否有 NaN
+        #for i, h in enumerate(text_hidden_states):
+        #    if torch.isnan(h).any():
+        #        print(f"❌ NaN detected in text_hidden_states[{i}], shape={h.shape}")
+        
+        if self.config.use_layer_wise_fusion:
+            if self.config.use_timestep_adaptive_fusion:
+                normalized_timestep = timestep.float() / 1000.0
+                #if torch.isnan(normalized_timestep).any():
+                #    print(f"❌ NaN detected in normalized_timestep")
+                
+                fused_text, weights = self.text_fusion_modules[layer_idx](
+                    text_hidden_states,
+                    normalized_timestep
+                )
+                
+                #if torch.isnan(weights).any():
+                #    print(f"❌ NaN detected in weights (mode 4), layer_idx={layer_idx}")
+                #if torch.isnan(fused_text).any():
+                #    print(f"❌ NaN detected in fused_text (mode 4), layer_idx={layer_idx}")
+            else:
+                normalized_hidden_states = [
+                    F.layer_norm(h.float(), normalized_shape=(self.config.text_hidden_size,))
+                    for h in text_hidden_states
+                ]
+                
+                #for i, nh in enumerate(normalized_hidden_states):
+                #    if torch.isnan(nh).any():
+                #        print(f"❌ NaN detected after layer_norm[{i}] (mode 3)")
+                
+                weights = F.softmax(self.text_fusion_weights[layer_idx].float(), dim=0)
+                #if torch.isnan(weights).any():
+                #    print(f"❌ NaN detected in weights (mode 3), values={self.text_fusion_weights[layer_idx]}")
+                
+                stacked = torch.stack(normalized_hidden_states, dim=0)
+                fused_text = torch.sum(
+                    stacked * weights.view(-1, 1, 1, 1),
+                    dim=0
+                ).to(dtype)
+                
+                #if torch.isnan(fused_text).any():
+                #    print(f"❌ NaN detected in fused_text (mode 3)")
+        else:
+            if self.config.use_timestep_adaptive_fusion:
+                normalized_timestep = timestep.float() / 1000.0
+                #if torch.isnan(normalized_timestep).any():
+                #    print(f"❌ NaN detected in normalized_timestep")
+                
+                fused_text, weights = self.text_fusion_module(
+                    text_hidden_states,
+                    normalized_timestep
+                )
+                
+                #if torch.isnan(weights).any():
+                #    print(f"❌ NaN detected in weights (mode 2)")
+                #if torch.isnan(fused_text).any():
+                #    print(f"❌ NaN detected in fused_text (mode 2)")
+            else:
+                normalized_hidden_states = [
+                    F.layer_norm(h.float(), normalized_shape=(self.config.text_hidden_size,))
+                    for h in text_hidden_states
+                ]
+                
+                #for i, nh in enumerate(normalized_hidden_states):
+                #    if torch.isnan(nh).any():
+                #        print(f"❌ NaN detected after layer_norm[{i}] (mode 1)")
+                
+                weights = F.softmax(self.text_fusion_weight.float(), dim=0)
+                #if torch.isnan(weights).any():
+                #    print(f"❌ NaN detected in weights (mode 1), values={self.text_fusion_weight}")
+                
+                stacked = torch.stack(normalized_hidden_states, dim=0)
+                fused_text = torch.sum(
+                    stacked * weights.view(-1, 1, 1, 1),
+                    dim=0
+                ).to(dtype)
+                
+                #if torch.isnan(fused_text).any():
+                #    print(f"❌ NaN detected in fused_text (mode 1)")
+        
+        return fused_text
     def prepare_hidden_states(self, hidden_states: torch.FloatTensor, temb: torch.FloatTensor, height: int, width: int):
         if not self.config.pos_embed == "ape":
             if self.config.timestep_conditioning == "addition":
@@ -712,12 +806,10 @@ class AdaFuseDiT(PreTrainedModel):
         patch_size = self.config.patch_size
         height = height // patch_size
         width = width // patch_size
-        if torch.isnan(hidden_states).any():
-            raise ValueError("Input hidden_states contains NaN values.")
+
         hidden_states = self.patch_embed(hidden_states)
         
-        if torch.isnan(hidden_states).any():
-            raise ValueError("Patched hidden_states contains NaN values.")
+
 
         if self.config.timestep_conditioning is not None:
             timestep_embed = self.time_proj(timestep).to(hidden_states.dtype)
@@ -732,6 +824,8 @@ class AdaFuseDiT(PreTrainedModel):
 
         hidden_states, pos_embed = self.prepare_hidden_states(hidden_states, temb, height, width)
 
+        #if torch.isnan(hidden_states).any():
+        #    raise ValueError("Prepared hidden_states contains NaN values.")
         cross_attention_mask = update_cross_attention_mask(
             attention_mask,
             hidden_states.shape[1],
@@ -747,8 +841,9 @@ class AdaFuseDiT(PreTrainedModel):
                 text_hidden_states,
                 timestep
             )
-            if torch.isnan(fused_text).any():
-                raise ValueError("Fused text features contain NaN values.")
+            #if torch.isnan(fused_text).any():
+            #    raise ValueError("Fused text features contain NaN values.")
+            
         for layer_idx in range(self.config.dit_num_hidden_layers):
             # 为当前层融合文本特征
             if self.config.use_layer_wise_fusion and text_hidden_states is not None:
@@ -757,8 +852,8 @@ class AdaFuseDiT(PreTrainedModel):
                     timestep,
                     layer_idx=layer_idx if self.config.use_layer_wise_fusion else None
                 )
-                if torch.isnan(fused_text).any():
-                    raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
+                #if torch.isnan(fused_text).any():
+                #    raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
             # 映射到 DiT 的隐藏维度
             # Force float32 for context_embedder
             dtype = fused_text.dtype
@@ -782,22 +877,26 @@ class AdaFuseDiT(PreTrainedModel):
                     fused_text,
                     cross_attention_mask
                 )
-
+            #(hidden_states).any():
+            #    raise ValueError(f"Hidden states after layer {layer_idx} contains NaN values.")
         if self.config.timestep_conditioning == "adaln-zero":
             hidden_states = self.norm_out(hidden_states, temb)
         else:
             # Force float32 for norm_out
             dtype = hidden_states.dtype
             hidden_states = self.norm_out(hidden_states.to(dtype=torch.float32)).to(dtype)
+        #if torch.isnan(hidden_states).any():
+        #   raise ValueError("Hidden states after norm_out contains NaN values.")
         if self.config.timestep_conditioning == "adaln-single":
             shift, scale = (self.scale_shift_table + repeat(timestep_embed, "b d -> b (2 d)")).chunk(2, dim=1)
             hidden_states = hidden_states * (1 + scale[:, None]) + shift[:, None]
         hidden_states = self.proj_out(hidden_states)
 
-        
+        #if torch.isnan(hidden_states).any():
+        #    raise ValueError("Hidden states after proj_out contains NaN values.")
         output = unpatchify(hidden_states, height, width, patch_size)
-        if torch.isnan(output).any():
-            raise ValueError("Output contains NaN values.")
+        #if torch.isnan(output).any():
+        #    raise ValueError("Output contains NaN values.")
         return output
 
     def initialize_weights(self):
