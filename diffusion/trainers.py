@@ -6,7 +6,6 @@ import math
 import os
 import random
 import shutil
-from pandas import isna
 from tqdm import tqdm
 
 from accelerate import Accelerator
@@ -84,7 +83,6 @@ class Trainer(ABC):
         """DiT 模型训练步骤"""
         pixel_values = batch["pixel_values"]
 
-        # 1. LLM 推理（no_grad）
         if self.hparams.model.encoder_type == "llm":
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"].to(self.accelerator.device)
@@ -109,15 +107,12 @@ class Trainer(ABC):
         else:
             raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder}")
 
-    
-        # 2. VAE 编码（no_grad，float32）
         model_input = pixel_values.to(self.accelerator.device)
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         model_input = model_input.to(dtype=self.weight_dtype)
 
-        # 3. DiT 前向
         noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
 
@@ -153,7 +148,6 @@ class Trainer(ABC):
         else:
             target = noise - model_input
 
-        # Loss 计算（float32）
         loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
         loss = loss.mean()
 
@@ -165,7 +159,6 @@ class Trainer(ABC):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
 
-        # 1. CLIP 推理（no_grad）
         if self.hparams.model.encoder_type == "clip-llm":
             clip_input_ids = batch["clip_input_ids"]
             with torch.no_grad():
@@ -174,14 +167,12 @@ class Trainer(ABC):
         else:
             text_modulation_embeds = None
 
-        # 2. VAE 编码（no_grad，float32）
         model_input = pixel_values.to(self.accelerator.device)
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         model_input = model_input.to(dtype=self.weight_dtype)
 
-        # 3. FuseDiT 前向
         noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
 
@@ -228,12 +219,11 @@ class Trainer(ABC):
         pixel_values = batch["pixel_values"]
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"].to(self.accelerator.device)
+        bsz = input_ids.shape[0]
 
-        # 1. LLM 推理（no_grad）
-        llm_attention_mask = update_self_attention_mask(
-            attention_mask, 0, False, self.accelerator.device,dtype=torch.float32
-        )
-        position_ids = torch.arange(input_ids.shape[1], device=self.accelerator.device).unsqueeze(0)
+        # 使用预计算的 position_ids 和 attention_mask
+        position_ids = self._cached_position_ids.expand(bsz, -1)
+        llm_attention_mask = self._cached_llm_attn_mask.expand(bsz, -1, -1, -1)
 
         with torch.no_grad():
             llm_output = self.llm(
@@ -257,16 +247,13 @@ class Trainer(ABC):
             text_hidden_states_index = getattr(self.hparams.model, 'text_hidden_states_index', -1)
             text_hidden_states = all_hidden_states[text_hidden_states_index].to(dtype=self.weight_dtype)
 
-        # 2. VAE 编码（no_grad，float32）
         model_input = pixel_values.to(self.accelerator.device)
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
         model_input = model_input.to(dtype=self.weight_dtype)
 
-        # 3. AdaFuseDiT 前向
         noise = torch.randn_like(model_input)
-        bsz = model_input.shape[0]
 
         u = compute_density_for_timestep_sampling(
             weighting_scheme=self.hparams.trainer.weighting_scheme,
@@ -282,11 +269,6 @@ class Trainer(ABC):
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
         noisy_model_input = noisy_model_input.to(dtype=self.weight_dtype)
 
-        if torch.isnan(noisy_model_input).any():
-            raise ValueError("NaN values found in noisy_model_input")
-        for hidden_states in text_hidden_states:
-            if torch.isnan(hidden_states).any():
-                raise ValueError("NaN values found in text_hidden_states")
         model_pred = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.accelerator.device),
@@ -343,7 +325,6 @@ class Trainer(ABC):
         """主训练循环"""
         self.before_training()
         
-        # 计算每个 epoch 的步数
         num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.hparams.trainer.gradient_accumulation_steps)
         num_train_epochs = math.ceil(self.hparams.trainer.max_steps / num_update_steps_per_epoch)
         
@@ -405,7 +386,6 @@ class AccelerateTrainer(Trainer):
         self.hparams = hparams
         self.global_step = 0
 
-        # 1. 创建 Accelerator（必须最先创建）
         project_config = ProjectConfiguration(
             project_dir=hparams.trainer.checkpoint_dir,
             logging_dir=os.path.join(hparams.trainer.checkpoint_dir, "logs")
@@ -414,39 +394,34 @@ class AccelerateTrainer(Trainer):
         mixed_precision = hparams.trainer.mixed_precision
         if mixed_precision == "fp32":
             mixed_precision = "no"
-        print('1'*100)
+
         self.accelerator = Accelerator(
             gradient_accumulation_steps=hparams.trainer.gradient_accumulation_steps,
             mixed_precision=mixed_precision,
             log_with="wandb" if is_wandb_available() else None,
             project_config=project_config,
         )
-        print('2'*100)
-        # 2. 设置随机种子
+
         if hparams.trainer.seed is not None:
             set_seed(hparams.trainer.seed)
 
-        # 3. 设置权重数据类型
         self.weight_dtype = torch.float32
         if self.accelerator.mixed_precision == "fp16":
             self.weight_dtype = torch.float16
         elif self.accelerator.mixed_precision == "bf16":
             self.weight_dtype = torch.bfloat16
 
-        # 4. 计算总 batch size
         self.total_batch_size = (
             hparams.data.batch_size * 
             self.accelerator.num_processes * 
             hparams.trainer.gradient_accumulation_steps
         )
 
-        # 5. 只在主进程打印初始化信息
         if self.accelerator.is_main_process:
             print(f"🚀 开始初始化 AccelerateTrainer...")
             print(f"  - 进程数: {self.accelerator.num_processes}")
             print(f"  - 混合精度: {self.accelerator.mixed_precision}")
 
-        # 6. 构建模型（在 prepare 之前，但不移动到设备）
         if self.accelerator.is_main_process:
             print(f"📦 构建模型...")
         self.model = build_model(hparams)
@@ -455,32 +430,27 @@ class AccelerateTrainer(Trainer):
         if hparams.trainer.enable_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        # 7. 创建优化器（在 prepare 之前）
         self.optimizer = torch.optim.AdamW(
             self.model.trainable_parameters(), 
             **hparams.optimizer
         )
 
-        # 8. 创建学习率调度器
         self.lr_scheduler = get_scheduler(
             **hparams.lr_scheduler, 
             optimizer=self.optimizer, 
             num_training_steps=hparams.trainer.max_steps * hparams.trainer.gradient_accumulation_steps
         )
 
-        # 9. 创建数据加载器（只在主进程打印）
         if self.accelerator.is_main_process:
             print(f"📚 加载数据集...")
         self.train_dataloader = get_dataloader(hparams)
 
-        # 10. 使用 accelerator.prepare() 包装（关键步骤）
         if self.accelerator.is_main_process:
             print(f"⚙️ 准备分布式训练...")
         self.model, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
 
-        # 11. prepare 之后再加载 frozen 模型到正确的设备
         device = self.accelerator.device
         if self.accelerator.is_main_process:
             print(f"📦 加载 VAE 到 {device}...")
@@ -489,7 +459,6 @@ class AccelerateTrainer(Trainer):
         self.vae.eval()
         self.vae.to(device, dtype=torch.float32)
 
-        # 12. 根据模型类型加载 LLM/CLIP
         if hparams.model.name == "DiT":
             if hparams.model.encoder_type == "llm":
                 if self.accelerator.is_main_process:
@@ -509,7 +478,17 @@ class AccelerateTrainer(Trainer):
                 self.llm = get_llm(hparams.model.base, self.accelerator.unwrap_model(self.model).config.base_config)
                 self.llm.requires_grad_(False)
                 self.llm.eval()
-                self.llm.to(device, dtype=torch.float32)
+                self.llm.to(device, dtype=self.weight_dtype)
+                
+                # 预计算 LLM 的 position_ids 和 attention_mask
+                max_seq_len = hparams.data.max_prompt_length + getattr(hparams.data, 'instruction_length', 0)
+                self._cached_position_ids = torch.arange(max_seq_len, device=device).unsqueeze(0)
+                self._cached_llm_attn_mask = update_self_attention_mask(
+                    torch.ones(1, max_seq_len, device=device, dtype=torch.long),
+                    0, False, device, dtype=self.weight_dtype
+                )
+                if self.accelerator.is_main_process:
+                    print(f"  ✅ 预计算 position_ids 和 attention_mask，序列长度: {max_seq_len}")
             else:
                 raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
             self.training_step = self.adafusedit_training_step
@@ -526,27 +505,20 @@ class AccelerateTrainer(Trainer):
         else:
             raise ValueError(f"Unknown model name: {hparams.model.name}")
 
-        # 13. 加载 Noise Scheduler（CPU 上即可）
         self.noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(**hparams.noise_scheduler)
 
-        # 14. 创建 EMA 模型（在 prepare 之后，避免 deepcopy 未包装的模型）
         if hparams.ema.update_steps is not None:
             if self.accelerator.is_main_process:
                 print(f"📦 创建 EMA 模型...")
-            # 使用 unwrap_model 获取原始模型再 deepcopy
             self.ema = deepcopy(self.accelerator.unwrap_model(self.model))
             self.ema.requires_grad_(False)
             self.ema.to(device)
         else:
             self.ema = None
 
-        # 15. 同步所有进程
         self.accelerator.wait_for_everyone()
-
-        # 16. 加载 checkpoint（如果存在）
         self.load_checkpoint()
 
-        # 17. 打印完成信息
         if self.accelerator.is_main_process:
             print(f"✅ AccelerateTrainer 初始化完成")
             print(f"  - 设备: {self.accelerator.device}")
@@ -582,13 +554,9 @@ class AccelerateTrainer(Trainer):
             if self.accelerator.is_main_process:
                 print(f"📂 正在从 {resume_from} 恢复训练...")
             
-            # accelerator.load_state 会自动恢复：模型、优化器、学习率调度器、随机状态
             self.accelerator.load_state(resume_from)
-            
-            # 从目录名提取 global_step
             self.global_step = int(os.path.basename(resume_from).split("-")[1])
             
-            # 加载 EMA（accelerator 不会自动保存 EMA）
             ema_path = os.path.join(resume_from, "ema.pt")
             if self.ema is not None and os.path.exists(ema_path):
                 self.ema.load_state_dict(torch.load(ema_path, map_location=self.accelerator.device))
@@ -613,24 +581,19 @@ class AccelerateTrainer(Trainer):
             f"checkpoint-{self.global_step}"
         )
         
-        # accelerator.save_state 会自动保存：模型、优化器、学习率调度器、随机状态
         self.accelerator.save_state(save_path)
-        
         self.accelerator.wait_for_everyone()
         
-        # 保存 EMA 模型（accelerator 不会自动保存 EMA）
         if self.ema is not None and self.accelerator.is_main_process:
             ema_path = os.path.join(save_path, "ema.pt")
             torch.save(self.ema.state_dict(), ema_path)
         
-        # 保存模型配置
         if self.accelerator.is_main_process:
             self.accelerator.unwrap_model(self.model).config.save_pretrained(save_path)
             print(f"💾 Checkpoint 已保存到 {save_path}")
         
         self.accelerator.wait_for_everyone()
         
-        # 删除旧的 checkpoint（保留 consolidation_steps 的和最近的）
         if self.accelerator.is_main_process:
             checkpoints = [d for d in os.listdir(self.hparams.trainer.checkpoint_dir) 
                           if d.startswith("checkpoint-")]
