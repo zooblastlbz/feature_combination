@@ -1,9 +1,10 @@
 import random
-import json
+import functools
 from pathlib import Path
 import os
 
 from datasets import load_dataset
+from datasets.fingerprint import Hasher
 import numpy as np
 from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -24,71 +25,79 @@ def _get_process_rank():
     return int(os.environ.get("RANK", "0"))
 
 
-class LocalImageTextDataset(Dataset):
+def _is_main_process():
+    """判断是否为主进程"""
+    return _get_process_rank() == 0
+
+
+def tokenize_captions(examples, tokenizer, text_key, instruction, max_length, 
+                      apply_chat_template, add_generation_prompt):
     """
-    本地 JSON 格式数据集加载器（使用 HuggingFace datasets）
-    
-    支持的 JSON 格式:
-    [
-        {"image": "path/to/image1.jpg", "text": "caption for image 1"},
-        {"image": "path/to/image2.jpg", "text": "caption for image 2"},
-        ...
-    ]
-    
-    可以通过 hparams.data.image_key 和 hparams.data.text_key 自定义键名
+    预先 tokenize 所有 captions（用于 datasets.map）
+    不考虑 drop rate，只 tokenize 完整的 caption
     """
-    def __init__(self, json_path, hparams, tokenizer, image_root=None):
+    captions = []
+    
+    for text in examples[text_key]:
+        caption = instruction + str(text)
+        captions.append(caption)
+    
+    if apply_chat_template:
+        all_input_ids = []
+        all_attention_masks = []
+        
+        for caption in captions:
+            tokenized = tokenizer.apply_chat_template(
+                [{"role": "user", "content": caption}],
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                add_generation_prompt=add_generation_prompt,
+                return_dict=True,
+            )
+            all_input_ids.append(tokenized["input_ids"].squeeze(0).tolist())
+            all_attention_masks.append(tokenized["attention_mask"].squeeze(0).tolist())
+        
+        examples["input_ids"] = all_input_ids
+        examples["attention_mask"] = all_attention_masks
+    else:
+        tokenized = tokenizer(
+            captions,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="np",
+        )
+        examples["input_ids"] = tokenized.input_ids.tolist()
+        examples["attention_mask"] = tokenized.attention_mask.tolist()
+    
+    return examples
+
+
+class PrecomputedTokenDataset(Dataset):
+    """
+    预计算 tokenized 结果的数据集
+    
+    使用 datasets.map() 预先计算所有 tokenized 结果，
+    __getitem__ 中只需要加载图像和获取预计算的 tokens
+    """
+    def __init__(self, dataset, hparams, image_key, text_key):
         """
         Args:
-            json_path: JSON 文件路径
+            dataset: 已经预计算 tokenized 结果的 HuggingFace Dataset（已设置 torch format）
             hparams: 训练超参数
-            tokenizer: 文本分词器
-            image_root: 图像根目录（如果 JSON 中的路径是相对路径）
+            image_key: 图像路径的键名
+            text_key: 文本的键名
         """
+        self.dataset = dataset
         self.hparams = hparams
-        self.tokenizer = tokenizer
-        self.image_root = Path(image_root) if image_root else None
+        self.image_key = image_key
+        self.text_key = text_key
+        self.image_root = Path(hparams.data.image_root) if getattr(hparams.data, 'image_root', None) else None
         
-        # 从配置中获取键名，提供默认值
-        self.image_key = getattr(hparams.data, 'image_key', 'image')
-        self.text_key = getattr(hparams.data, 'text_key', 'text')
+        self.max_load_attempts = getattr(hparams.data, 'max_load_attempts', 3)
         
-        # 错误处理配置
-        self.max_load_attempts = getattr(hparams.data, 'max_load_attempts', 5)
-        self.log_errors = getattr(hparams.data, 'log_image_errors', True)
-        
-        # 使用 datasets 加载 JSON 数据
-        print(f"📚 正在使用 datasets 库加载 {json_path}...")
-        self.dataset = load_dataset('json', data_files=json_path, split='train')
-        
-        print(f"✅ 成功加载 {len(self.dataset)} 个样本从 {json_path}")
-        print(f"📌 使用键名: image_key='{self.image_key}', text_key='{self.text_key}'")
-        print(f"📊 数据集特征: {self.dataset.column_names}")
-        
-        # 验证数据集是否包含指定的键
-        if self.image_key not in self.dataset.column_names:
-            raise KeyError(
-                f"❌ JSON 中找不到图像键 '{self.image_key}'，"
-                f"可用的键: {self.dataset.column_names}"
-            )
-        if self.text_key not in self.dataset.column_names:
-            raise KeyError(
-                f"❌ JSON 中找不到文本键 '{self.text_key}'，"
-                f"可用的键: {self.dataset.column_names}"
-            )
-        
-        # 错误日志
-        if self.log_errors:
-            log_dir = Path(hparams.trainer.checkpoint_dir) / "data_logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            self.error_log_path = log_dir / f"corrupted_images_rank_{_get_process_rank()}.txt"
-            print(f"📝 错误日志: {self.error_log_path}")
-        else:
-            self.error_log_path = None
-        
-        self.error_count = 0
-        
-        # 图像预处理变换
         self.transform = transforms.Compose([
             transforms.Resize(hparams.data.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
             (transforms.CenterCrop(hparams.data.resolution) if hparams.data.center_crop 
@@ -96,42 +105,30 @@ class LocalImageTextDataset(Dataset):
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
         ])
+        
+        self._placeholder_image = None
     
     def __len__(self):
         return len(self.dataset)
     
-    def _load_image_robust(self, image_path):
-        """鲁棒的图像加载方法"""
+    def _get_placeholder_image(self):
+        """获取占位符图像（懒加载）"""
+        if self._placeholder_image is None:
+            self._placeholder_image = Image.new(
+                'RGB', 
+                (self.hparams.data.resolution, self.hparams.data.resolution), 
+                (128, 128, 128)
+            )
+        return self._placeholder_image.copy()
+    
+    def _load_image(self, image_path):
+        """简化的图像加载方法"""
         try:
-            if not Path(image_path).exists():
-                return None, f"文件不存在: {image_path}"
-            
             image = Image.open(image_path)
             image.load()
-            image = image.convert('RGB')
-            return image, None
-            
-        except Exception as e:
-            return None, str(e)
-    
-    def _log_error(self, idx, image_path, error_msg):
-        """记录错误到日志文件"""
-        if not self.log_errors or self.error_log_path is None:
-            return
-        
-        try:
-            with open(self.error_log_path, 'a') as f:
-                f.write(f"{idx}\t{image_path}\t{error_msg}\n")
+            return image.convert('RGB')
         except Exception:
-            pass
-    
-    def _create_placeholder_image(self):
-        """创建灰色占位符图像"""
-        return Image.new(
-            'RGB', 
-            (self.hparams.data.resolution, self.hparams.data.resolution), 
-            (128, 128, 128)
-        )
+            return None
     
     def __getitem__(self, idx):
         original_idx = idx
@@ -139,83 +136,28 @@ class LocalImageTextDataset(Dataset):
         item = None
         
         for attempt in range(self.max_load_attempts):
-            try:
-                item = self.dataset[idx]
-                
-                image_path = item[self.image_key]
-                if self.image_root:
-                    image_path = self.image_root / image_path
-                else:
-                    image_path = Path(image_path)
-                
-                image, error = self._load_image_robust(image_path)
-                
-                if image is not None:
-                    break
-                else:
-                    self.error_count += 1
-                    
-                    if attempt == 0:
-                        self._log_error(original_idx, str(image_path), error)
-                    
-                    if attempt < self.max_load_attempts - 1:
-                        idx = random.randint(0, len(self.dataset) - 1)
-                        if attempt == 0:
-                            print(f"⚠️ [{self.error_count}] 无法加载图像 {image_path}: {error}")
-                    else:
-                        image = self._create_placeholder_image()
-                        item = self.dataset[original_idx]
-                        break
-                        
-            except Exception as e:
-                self.error_count += 1
-                print(f"❌ 处理样本 {idx} 时发生未预期错误: {e}")
-                
-                if attempt < self.max_load_attempts - 1:
-                    idx = random.randint(0, len(self.dataset) - 1)
-                else:
-                    image = self._create_placeholder_image()
-                    item = self.dataset[original_idx]
-                    break
+            item = self.dataset[idx]
+            
+            image_path = item[self.image_key]
+            if self.image_root:
+                image_path = str(self.image_root / image_path)
+            
+            image = self._load_image(image_path)
+            
+            if image is not None:
+                break
+            elif attempt < self.max_load_attempts - 1:
+                idx = random.randint(0, len(self.dataset) - 1)
         
         if image is None:
-            image = self._create_placeholder_image()
+            image = self._get_placeholder_image()
             item = self.dataset[original_idx]
         
         pixel_values = self.transform(image)
         
-        caption = str(item[self.text_key])
-        
-        # 随机丢弃 caption（用于 CFG 训练）
-        if random.random() < self.hparams.data.random_dropping_rate:
-            caption = ""
-
-            
-        instruction = getattr(self.hparams.data, 'instruction', '')
-        caption = instruction + caption
-        # Tokenize 文本
-        if hasattr(self.hparams.data, 'apply_chat_template') and self.hparams.data.apply_chat_template and caption != "":
-            tokenized = self.tokenizer.apply_chat_template(
-                [{"role": "user", "content": caption}],
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.hparams.data.max_prompt_length + self.hparams.data.instruction_length,
-                add_generation_prompt=self.hparams.data.add_generation_prompt,
-                return_dict=True,
-            )
-            input_ids = tokenized["input_ids"]
-            attention_mask = tokenized["attention_mask"]
-        else:
-            tokenized = self.tokenizer(
-                caption,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.hparams.data.max_prompt_length + self.hparams.data.instruction_length,
-            )
-            input_ids = tokenized.input_ids
-            attention_mask = tokenized.attention_mask
+        # 优化点2: 使用 set_format("torch") 后，直接获取 tensor，无需转换
+        input_ids = item["input_ids"]
+        attention_mask = item["attention_mask"]
         
         return {
             "pixel_values": pixel_values,
@@ -224,66 +166,224 @@ class LocalImageTextDataset(Dataset):
         }
 
 
-def collate_fn(examples):
-    """数据集 collate 函数"""
-    pixel_values = [example["pixel_values"] for example in examples]
-    pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
-    input_ids = [example["input_ids"] for example in examples]
-    input_ids = torch.cat(input_ids).to(memory_format=torch.contiguous_format)
-    attention_mask = [example["attention_mask"] for example in examples]
-    attention_mask = torch.cat(attention_mask).to(memory_format=torch.contiguous_format)
+def create_collate_fn(random_dropping_rate, empty_input_ids, empty_attention_mask):
+    """
+    创建带有动态 caption dropping 的 collate 函数
+    
+    Args:
+        random_dropping_rate: caption drop 的概率（用于 CFG）
+        empty_input_ids: 预计算的空 caption input_ids
+        empty_attention_mask: 预计算的空 caption attention_mask
+    """
+    def collate_fn(examples):
+        """数据集 collate 函数，支持动态 caption dropping"""
+        batch_size = len(examples)
+        
+        pixel_values = torch.stack([ex["pixel_values"] for ex in examples])
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        
+        # 优化点3: 向量化 drop 判断，避免循环中的 random.random()
+        if random_dropping_rate > 0:
+            drop_mask = torch.rand(batch_size) < random_dropping_rate
+        else:
+            drop_mask = None
+        
+        input_ids_list = []
+        attention_mask_list = []
+        
+        for i, ex in enumerate(examples):
+            if drop_mask is not None and drop_mask[i]:
+                # 优化点1: 移除 clone()，torch.stack 会自动复制数据
+                input_ids_list.append(empty_input_ids)
+                attention_mask_list.append(empty_attention_mask)
+            else:
+                input_ids_list.append(ex["input_ids"])
+                attention_mask_list.append(ex["attention_mask"])
+        
+        input_ids = torch.stack(input_ids_list)
+        input_ids = input_ids.to(memory_format=torch.contiguous_format)
+        
+        attention_mask = torch.stack(attention_mask_list)
+        attention_mask = attention_mask.to(memory_format=torch.contiguous_format)
 
-    return {
-        "pixel_values": pixel_values,
-        "input_ids": input_ids,
-        "attention_mask": attention_mask
-    }
+        return {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask
+        }
+    
+    return collate_fn
+
+
+def _compute_empty_caption_tokens(tokenizer, instruction, max_length, apply_chat_template, add_generation_prompt):
+    """
+    预计算空 caption 的 tokens（用于 CFG dropping）
+    """
+    empty_caption = instruction if instruction else ""
+    
+    if apply_chat_template:
+        if empty_caption:
+            tokenized = tokenizer.apply_chat_template(
+                [{"role": "user", "content": empty_caption}],
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+                add_generation_prompt=add_generation_prompt,
+                return_dict=True,
+            )
+            empty_input_ids = tokenized["input_ids"].squeeze(0)
+            empty_attention_mask = tokenized["attention_mask"].squeeze(0)
+        else:
+            tokenized = tokenizer(
+                "",
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+            )
+            empty_input_ids = tokenized.input_ids.squeeze(0)
+            empty_attention_mask = tokenized.attention_mask.squeeze(0)
+            if empty_attention_mask.sum() == 0:
+                empty_attention_mask[0] = 1
+    else:
+        tokenized = tokenizer(
+            empty_caption,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+        )
+        empty_input_ids = tokenized.input_ids.squeeze(0)
+        empty_attention_mask = tokenized.attention_mask.squeeze(0)
+        if empty_attention_mask.sum() == 0:
+            empty_attention_mask[0] = 1
+    
+    return empty_input_ids, empty_attention_mask
 
 
 def get_dataloader(hparams):
     """
     创建本地 JSON 数据集的 DataLoader
     
-    在 YAML 配置文件中设置:
-    data:
-      data_path: "path/to/your/data.json"
-      image_root: "path/to/images"  # 可选
-      image_key: "image"
-      text_key: "text"
+    使用 datasets.map() 预先计算所有 tokenized 结果
+    训练时在 collate_fn 中动态进行 caption dropping
     """
     tokenizer = AutoTokenizer.from_pretrained(hparams.data.tokenizer)
     
-    # 计算 instruction 长度
-    if hasattr(hparams.data, 'apply_chat_template') and hparams.data.apply_chat_template:
-        hparams.data.instruction_length = tokenizer.apply_chat_template(
-            [{"role": "user", "content": hparams.data.instruction.rstrip()}],
+    image_key = getattr(hparams.data, 'image_key', 'image')
+    text_key = getattr(hparams.data, 'text_key', 'text')
+    
+    instruction = getattr(hparams.data, 'instruction', '')
+    apply_chat_template = getattr(hparams.data, 'apply_chat_template', False)
+    add_generation_prompt = getattr(hparams.data, 'add_generation_prompt', False)
+    random_dropping_rate = getattr(hparams.data, 'random_dropping_rate', 0.0)
+    
+    if apply_chat_template and instruction:
+        instruction_length = tokenizer.apply_chat_template(
+            [{"role": "user", "content": instruction.rstrip()}],
             return_tensors="pt",
             padding=False,
             truncation=True,
             max_length=hparams.data.max_prompt_length,
-            add_generation_prompt=hparams.data.add_generation_prompt,
+            add_generation_prompt=add_generation_prompt,
             return_dict=True,
         )["input_ids"].shape[1] - 1
+    elif instruction:
+        instruction_length = tokenizer(
+            instruction.rstrip(),
+            return_tensors="pt",
+            padding=False,
+            truncation=True,
+            max_length=hparams.data.max_prompt_length,
+        ).input_ids.shape[1] - 1
     else:
-        instruction = getattr(hparams.data, 'instruction', '')
-        if instruction:
-            hparams.data.instruction_length = tokenizer(
-                instruction.rstrip(),
-                return_tensors="pt",
-                padding=False,
-                truncation=True,
-                max_length=hparams.data.max_prompt_length,
-            ).input_ids.shape[1] - 1
-        else:
-            hparams.data.instruction_length = 0
+        instruction_length = 0
     
-    # 创建数据集
-    image_root = getattr(hparams.data, 'image_root', None)
-    dataset = LocalImageTextDataset(
-        json_path=hparams.data.data_path,
-        hparams=hparams,
+    max_length = hparams.data.max_prompt_length + instruction_length
+    
+    if _is_main_process():
+        print(f"📚 正在加载数据集 {hparams.data.data_path}...")
+    
+    dataset = load_dataset('json', data_files=hparams.data.data_path, split='train')
+    
+    if _is_main_process():
+        print(f"✅ 成功加载 {len(dataset)} 个样本")
+        print(f"📌 使用键名: image_key='{image_key}', text_key='{text_key}'")
+    
+    if image_key not in dataset.column_names:
+        raise KeyError(f"❌ JSON 中找不到图像键 '{image_key}'")
+    if text_key not in dataset.column_names:
+        raise KeyError(f"❌ JSON 中找不到文本键 '{text_key}'")
+    
+    if _is_main_process():
+        print(f"🔄 正在预计算 tokenized 结果...")
+        print(f"  - max_length: {max_length}")
+        print(f"  - apply_chat_template: {apply_chat_template}")
+        print(f"  - random_dropping_rate: {random_dropping_rate} (将在训练时动态应用)")
+    
+    tokenize_fn = functools.partial(
+        tokenize_captions,
         tokenizer=tokenizer,
-        image_root=image_root
+        text_key=text_key,
+        instruction=instruction,
+        max_length=max_length,
+        apply_chat_template=apply_chat_template,
+        add_generation_prompt=add_generation_prompt,
+    )
+    
+    cache_fingerprint = Hasher.hash({
+        "tokenizer": hparams.data.tokenizer,
+        "max_length": max_length,
+        "instruction": instruction,
+        "apply_chat_template": apply_chat_template,
+        "add_generation_prompt": add_generation_prompt,
+    })
+    
+    dataset_with_tokens = dataset.map(
+        tokenize_fn,
+        batched=True,
+        batch_size=1000,
+        num_proc=min(8, os.cpu_count() or 1),
+        new_fingerprint=cache_fingerprint,
+        desc="Tokenizing captions",
+    )
+    
+    if _is_main_process():
+        print(f"✅ Tokenization 完成")
+    
+    # 优化点2: 设置 torch format，避免 __getitem__ 中的 torch.tensor() 转换
+    dataset_with_tokens.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask"],
+        output_all_columns=True,  # 保留其他列（如 image_key）
+    )
+    
+    if _is_main_process():
+        print(f"✅ 已设置 torch format，避免运行时 tensor 转换")
+    
+    empty_input_ids, empty_attention_mask = _compute_empty_caption_tokens(
+        tokenizer=tokenizer,
+        instruction=instruction,
+        max_length=max_length,
+        apply_chat_template=apply_chat_template,
+        add_generation_prompt=add_generation_prompt,
+    )
+    
+    if _is_main_process():
+        print(f"✅ 空 caption tokens 预计算完成 (用于 CFG dropping)")
+    
+    train_dataset = PrecomputedTokenDataset(
+        dataset=dataset_with_tokens,
+        hparams=hparams,
+        image_key=image_key,
+        text_key=text_key,
+    )
+    
+    collate_fn = create_collate_fn(
+        random_dropping_rate=random_dropping_rate,
+        empty_input_ids=empty_input_ids,
+        empty_attention_mask=empty_attention_mask,
     )
     
     def seed_worker(worker_id):
@@ -294,17 +394,30 @@ def get_dataloader(hparams):
     g = torch.Generator()
     g.manual_seed(int(hparams.trainer.seed) + _get_process_rank())
 
+    num_workers = hparams.data.dataloader_num_workers
+    persistent_workers = getattr(hparams.data, 'persistent_workers', True) and num_workers > 0
+    prefetch_factor = getattr(hparams.data, 'prefetch_factor', 4) if num_workers > 0 else None
+    pin_memory = getattr(hparams.data, 'pin_memory', True)
+
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         batch_size=hparams.data.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=hparams.data.dataloader_num_workers,
+        num_workers=num_workers,
         generator=g,
         worker_init_fn=seed_worker,
-        pin_memory=True,
+        pin_memory=pin_memory,
         drop_last=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
     )
     
-    print(f"✅ DataLoader 创建完成，共 {len(dataloader)} 个 batch")
+    if _is_main_process():
+        print(f"✅ DataLoader 创建完成，共 {len(dataloader)} 个 batch")
+        print(f"  - num_workers: {num_workers}")
+        print(f"  - persistent_workers: {persistent_workers}")
+        print(f"  - prefetch_factor: {prefetch_factor}")
+        print(f"  - pin_memory: {pin_memory}")
+    
     return dataloader
