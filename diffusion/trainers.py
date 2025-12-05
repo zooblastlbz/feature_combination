@@ -6,6 +6,7 @@ import math
 import os
 import random
 import shutil
+from pandas import isna
 from tqdm import tqdm
 
 from accelerate import Accelerator
@@ -108,6 +109,7 @@ class Trainer(ABC):
         else:
             raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder}")
 
+    
         # 2. VAE 编码（no_grad，float32）
         model_input = pixel_values.to(self.accelerator.device)
         with torch.no_grad():
@@ -229,8 +231,7 @@ class Trainer(ABC):
 
         # 1. LLM 推理（no_grad）
         llm_attention_mask = update_self_attention_mask(
-            attention_mask, 0, False, self.accelerator.device, 
-            self.weight_dtype
+            attention_mask, 0, False, self.accelerator.device,dtype=torch.float32
         )
         position_ids = torch.arange(input_ids.shape[1], device=self.accelerator.device).unsqueeze(0)
 
@@ -281,6 +282,11 @@ class Trainer(ABC):
         noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
         noisy_model_input = noisy_model_input.to(dtype=self.weight_dtype)
 
+        if torch.isnan(noisy_model_input).any():
+            raise ValueError("NaN values found in noisy_model_input")
+        for hidden_states in text_hidden_states:
+            if torch.isnan(hidden_states).any():
+                raise ValueError("NaN values found in text_hidden_states")
         model_pred = self.model(
             hidden_states=noisy_model_input,
             timestep=timesteps.to(self.accelerator.device),
@@ -503,7 +509,7 @@ class AccelerateTrainer(Trainer):
                 self.llm = get_llm(hparams.model.base, self.accelerator.unwrap_model(self.model).config.base_config)
                 self.llm.requires_grad_(False)
                 self.llm.eval()
-                self.llm.to(device, dtype=self.weight_dtype)
+                self.llm.to(device, dtype=torch.float32)
             else:
                 raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
             self.training_step = self.adafusedit_training_step

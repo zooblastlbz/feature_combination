@@ -1107,8 +1107,8 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
                         text_hidden_states=text_hidden_states,  # list or single tensor
                         attention_mask=attention_mask,
                     )
-                    if torch.isnan(noise_pred).any():
-                        print(f"NaN detected in noise_pred at step {i}, timestep {t}")
+                    #if torch.isnan(noise_pred).any():
+                    #    print(f"NaN detected in noise_pred at step {i}, timestep {t}")
                     # perform guidance
                     if self.do_classifier_free_guidance:
                         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)

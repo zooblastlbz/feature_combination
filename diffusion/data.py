@@ -189,10 +189,10 @@ class LocalImageTextDataset(Dataset):
         # 随机丢弃 caption（用于 CFG 训练）
         if random.random() < self.hparams.data.random_dropping_rate:
             caption = ""
-        else:
-            instruction = getattr(self.hparams.data, 'instruction', '')
-            caption = instruction + caption
-        
+
+            
+        instruction = getattr(self.hparams.data, 'instruction', '')
+        caption = instruction + caption
         # Tokenize 文本
         if hasattr(self.hparams.data, 'apply_chat_template') and self.hparams.data.apply_chat_template and caption != "":
             tokenized = self.tokenizer.apply_chat_template(

@@ -8,13 +8,12 @@ import torch.nn.functional as F
 from transformers.models.gemma.modeling_gemma import (
     apply_rotary_pos_emb,
     GemmaMLP,
-    GemmaRMSNorm,
     repeat_kv,
 )
 
 from .configs import DiTConfig
 
-
+from torch.nn import RMSNorm
 class AdaLayerNormZero(nn.Module):
     def __init__(self, config: DiTConfig):
         super().__init__()
@@ -22,7 +21,7 @@ class AdaLayerNormZero(nn.Module):
 
         self.silu = nn.SiLU()
         self.linear = nn.Linear(config.dit_hidden_size, 6 * config.dit_hidden_size, bias=True)
-        self.norm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+        self.norm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor):
         emb = self.linear(self.silu(emb))
@@ -45,7 +44,7 @@ class AdaLayerNormOut(nn.Module):
         
         self.silu = nn.SiLU()
         self.linear = nn.Linear(config.dit_hidden_size, config.dit_hidden_size * 2, bias=True)
-        self.norm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+        self.norm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         emb = self.linear(self.silu(emb))
@@ -72,8 +71,8 @@ class DiTSelfAttention(nn.Module):
         self.num_key_value_groups = config.base_config.num_attention_heads // config.base_config.num_key_value_heads
 
         if config.qk_norm:
-            self.q_norm = GemmaRMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
-            self.k_norm = GemmaRMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
+            self.q_norm = RMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
+            self.k_norm = RMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
 
         self.q_proj = nn.Linear(
             config.dit_hidden_size,
@@ -166,9 +165,9 @@ class DiTCrossAttention(nn.Module):
         self.num_key_value_groups = config.base_config.num_attention_heads // config.base_config.num_key_value_heads
 
         if config.qk_norm:
-            self.q_norm = GemmaRMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
+            self.q_norm = RMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
             if config.model_type == "DiT":
-                self.k_norm = GemmaRMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
+                self.k_norm = RMSNorm(config.base_config.head_dim, eps=config.base_config.rms_norm_eps)
 
         self.q_proj = nn.Linear(
             config.dit_hidden_size,
@@ -201,31 +200,81 @@ class DiTCrossAttention(nn.Module):
         value_states: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
     ):
+        # Step 1: 检查输入
+        #if torch.isnan(dit_hidden_states).any():
+        #    raise ValueError(f"[CrossAttn] NaN in dit_hidden_states input")
+        #if text_hidden_states is not None and torch.isnan(text_hidden_states).any():
+        #    raise ValueError(f"[CrossAttn] NaN in text_hidden_states input")
+        
+        # Step 2: Q 投影
         query_states = self.q_proj(dit_hidden_states)
+        #if torch.isnan(query_states).any():
+        #    raise ValueError(f"[CrossAttn] NaN after q_proj")
+        
+        # Step 3: K/V 投影
         if self.config.model_type == "DiT":
             key_states = self.text_k_proj(text_hidden_states)
             value_states = self.text_v_proj(text_hidden_states)
+            #if torch.isnan(key_states).any():
+            #    raise ValueError(f"[CrossAttn] NaN after text_k_proj")
+            #if torch.isnan(value_states).any():
+            #    raise ValueError(f"[CrossAttn] NaN after text_v_proj")
 
+        # Step 4: Reshape
         query_states = rearrange(query_states, "b n (h d) -> b h n d", h=self.config.base_config.num_attention_heads)
         if self.config.model_type == "DiT":
             key_states = rearrange(key_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
             value_states = rearrange(value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
+        # Step 5: QK Norm
         if self.config.qk_norm:
             dtype = query_states.dtype
             query_states = self.q_norm(query_states.to(dtype=torch.float32)).to(dtype=dtype)
+            #if torch.isnan(query_states).any():
+            #    raise ValueError(f"[CrossAttn] NaN after q_norm")
             if self.config.model_type == "DiT":
                 key_states = self.k_norm(key_states.to(dtype=torch.float32)).to(dtype=dtype)
-                
+            #    if torch.isnan(key_states).any():
+            #        raise ValueError(f"[CrossAttn] NaN after k_norm")
+        
+        # Step 6: Repeat KV
         if self.config.model_type == "DiT":
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask, is_causal=False)
+        # Step 7: 检查 attention_mask
+        #if attention_mask is not None:
+        #    if torch.isnan(attention_mask).any():
+        #        raise ValueError(f"[CrossAttn] NaN in attention_mask")
+            # 检查是否有全 -inf 的行（会导致 softmax 输出 NaN）
+        #    if attention_mask.dtype in [torch.float16, torch.bfloat16, torch.float32]:
+        #        all_masked = (attention_mask < -1e9).all(dim=-1)
+        #        if all_masked.any():
+        #            raise ValueError(f"[CrossAttn] attention_mask has rows that are all masked (-inf), will cause NaN in softmax")
 
+        # Step 8: 检查 QK 点积范围（调试用）
+        #with torch.no_grad():
+        #    qk_scale = query_states.shape[-1] ** -0.5
+        #    qk = torch.matmul(query_states, key_states.transpose(-2, -1)) * qk_scale
+        #    if torch.isnan(qk).any():
+        #        raise ValueError(f"[CrossAttn] NaN in QK dot product")
+        #    qk_max = qk.abs().max().item()
+        #    if qk_max > 100:
+        #        print(f"⚠️ [CrossAttn] Warning: QK values too large: max={qk_max:.2f}")
+
+        # Step 9: Scaled Dot Product Attention
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states, 
+            attn_mask=attention_mask, is_causal=False
+        )
+        #if torch.isnan(attn_output).any():
+        #    raise ValueError(f"[CrossAttn] NaN after scaled_dot_product_attention")
+
+        # Step 10: Reshape 和 O 投影
         attn_output = rearrange(attn_output, "b h n d -> b n (h d)")
-
         attn_output = self.o_proj(attn_output)
+        #if torch.isnan(attn_output).any():
+        #    raise ValueError(f"[CrossAttn] NaN after o_proj")
 
         return attn_output
 
@@ -244,18 +293,18 @@ class DiTLayer(nn.Module):
         else:
             if config.timestep_conditioning == "adaln-single":
                 self.scale_shift_table = nn.Parameter(torch.randn(6 * config.dit_hidden_size) / config.dit_hidden_size ** 0.5)
-            self.input_layernorm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+            self.input_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
 
         self.self_attn = DiTSelfAttention(config)
         if config.attention == "cross":
             self.cross_attn = DiTCrossAttention(config)
 
-        self.post_attention_layernorm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
         if config.sandwich_norm:
-            self.pre_feedforward_layernorm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
-            self.post_feedforward_layernorm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+            self.pre_feedforward_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+            self.post_feedforward_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
             if config.attention == "cross":
-                self.post_cross_attention_layernorm = GemmaRMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+                self.post_cross_attention_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
         mlp_config = deepcopy(config.base_config)
         mlp_config.hidden_size = config.dit_hidden_size
         self.mlp = GemmaMLP(mlp_config)
@@ -281,6 +330,8 @@ class DiTLayer(nn.Module):
                 gate_msa = gate_mlp = torch.ones_like(temb)
 
         # Attention.
+        #if torch.isnan(norm_hidden_states).any():
+        #    raise ValueError("NaN values found in norm_hidden_states before attention")
         norm_hidden_states = norm_hidden_states * (1 + scale_msa[:, None]) + shift_msa[:, None]
 
         if self.config.attention == "self":
@@ -293,15 +344,18 @@ class DiTLayer(nn.Module):
             hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
         elif self.config.attention == "cross":
             attn_output = self.self_attn(norm_hidden_states, pos_embed)
-
+            #if torch.isnan(attn_output).any():
+            #    raise ValueError("NaN values found in attn_output after self attention")
             if self.config.sandwich_norm:
                 dtype = attn_output.dtype
                 attn_output = self.post_attention_layernorm(attn_output.to(dtype=torch.float32)).to(dtype=dtype)
 
             hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
-
+            #if torch.isnan(hidden_states).any():
+            #    raise ValueError("NaN values found in hidden_states before cross attention")
             cross_attn_output = self.cross_attn(hidden_states, text_hidden_states=text_hidden_states, attention_mask=attention_mask)
-
+            #if torch.isnan(cross_attn_output).any():
+            #    raise ValueError("NaN values found in cross_attn_output after cross attention")
             if self.config.sandwich_norm:
                 dtype = cross_attn_output.dtype
                 cross_attn_output = self.post_cross_attention_layernorm(cross_attn_output.to(dtype=torch.float32)).to(dtype=dtype)
@@ -316,9 +370,11 @@ class DiTLayer(nn.Module):
             norm_hidden_states = self.post_attention_layernorm(hidden_states.to(dtype=torch.float32)).to(dtype=dtype)
 
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-
+        #if torch.isnan(norm_hidden_states).any():
+        #    raise ValueError("NaN values found in norm_hidden_states before MLP")
         mlp_output = self.mlp(norm_hidden_states)
-
+        #if torch.isnan(mlp_output).any():
+        #    raise ValueError("NaN values found in mlp_output after MLP")
         if self.config.sandwich_norm:
             dtype = mlp_output.dtype
             mlp_output = self.post_feedforward_layernorm(mlp_output.to(dtype=torch.float32)).to(dtype=dtype)
