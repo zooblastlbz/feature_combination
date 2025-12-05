@@ -61,7 +61,7 @@ lr_scheduler:
   num_warmup_steps: 0
 
 data:
-  apply_chat_template: true
+  apply_chat_template: false
   batch_size: 8
   center_crop: true
   dataloader_num_workers: 8
