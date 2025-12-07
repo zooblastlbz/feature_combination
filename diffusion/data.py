@@ -165,7 +165,7 @@ class PreprocessTrain:
 
         # 添加 instruction 前缀（对非空caption）
         if self.instruction:
-            captions = [self.instruction + caption if caption else "" for caption in captions]
+            captions = [self.instruction + caption  for caption in captions]
 
         # Tokenize captions
         if self.apply_chat_template:
@@ -205,7 +205,7 @@ class PreprocessTrain:
             inputs = self.tokenizer(
                 captions,
                 max_length=self.max_length,
-                padding="longest",
+                padding="max_length",
                 truncation=True,
                 return_tensors="pt",
             )
@@ -258,29 +258,9 @@ def get_dataloader(hparams):
     random_dropping_rate = getattr(hparams.data, 'random_dropping_rate', 0.0)
     image_root = getattr(hparams.data, 'image_root', None)
     
-    # 计算 max_length
-    if apply_chat_template and instruction:
-        instruction_length = tokenizer.apply_chat_template(
-            [{"role": "user", "content": instruction.rstrip()}],
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=hparams.data.max_prompt_length,
-            add_generation_prompt=add_generation_prompt,
-            return_dict=True,
-        )["input_ids"].shape[1] - 1
-    elif instruction:
-        instruction_length = tokenizer(
-            instruction.rstrip(),
-            return_tensors="pt",
-            padding=False,
-            truncation=True,
-            max_length=hparams.data.max_prompt_length,
-        ).input_ids.shape[1] - 1
-    else:
-        instruction_length = 0
-    
-    max_length = hparams.data.max_prompt_length + instruction_length
+
+
+    max_length = hparams.data.max_prompt_length 
     
     if _is_main_process():
         print(f"📚 正在加载数据集 {hparams.data.data_path}...")

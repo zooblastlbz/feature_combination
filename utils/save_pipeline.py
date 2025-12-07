@@ -29,6 +29,18 @@ def main(args):
                 checkpoint_dir, tag = os.path.split(checkpoint_dir.rstrip(os.sep))
 
         state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag)
+    elif args.trainer == "accelerate":
+        checkpoint_dir = args.checkpoint
+        safetensors_path = os.path.join(checkpoint_dir, "model.safetensors")
+        bin_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
+        
+        if os.path.exists(safetensors_path):
+            from safetensors.torch import load_file
+            state_dict = load_file(safetensors_path)
+        elif os.path.exists(bin_path):
+            state_dict = torch.load(bin_path, map_location="cpu")
+        else:
+            raise FileNotFoundError(f"Could not find model.safetensors or pytorch_model.bin in {checkpoint_dir}")
     elif args.trainer == "spmd":
         if args.compression:
             with open(f"{args.checkpoint}/model.pt.zst", "rb") as f:
@@ -82,18 +94,21 @@ def main(args):
     try:
         from transformers import AutoModelForCausalLM
         lm = AutoModelForCausalLM.from_pretrained(model_path)
-        return lm.model if hasattr(lm, "model") else lm
+        lm = lm.model if hasattr(lm, "model") else lm
     except Exception:
-        pass
-    # 2) Try vision-language models and extract the language sub-module
-    try:
-        from transformers import AutoModelForImageTextToText
-        vl = AutoModelForImageTextToText.from_pretrained(model_path)
-        for attr in ["language_model", "text_model", "model"]:
-            if hasattr(vl, attr):
-                lm = getattr(vl, attr)
-    except Exception as e:
-        raise ValueError(f"Unknown model: {model_path}") from e
+        lm = None
+
+    if lm is None:
+        # 2) Try vision-language models and extract the language sub-module
+        try:
+            from transformers import AutoModelForImageTextToText
+            vl = AutoModelForImageTextToText.from_pretrained(model_path)
+            for attr in ["language_model", "text_model", "model"]:
+                if hasattr(vl, attr):
+                    lm = getattr(vl, attr)
+                    break
+        except Exception as e:
+            raise ValueError(f"Unknown model: {model_path}") from e
 
 
 
