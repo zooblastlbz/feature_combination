@@ -364,7 +364,7 @@ class DiT(PreTrainedModel):
         # Force float32 for context_embedder (which contains Norm)
         if text_hidden_states is not None:
             dtype = text_hidden_states.dtype
-            text_hidden_states = self.context_embedder(text_hidden_states.to(dtype=torch.float32)).to(dtype)
+            text_hidden_states = self.context_embedder(text_hidden_states).to(dtype)
 
         cross_attention_mask = update_cross_attention_mask(
             attention_mask,

@@ -91,6 +91,7 @@ def visualize(args):
             with torch.no_grad():
                 t_embed = module._time_embedding(t_input)
                 w = module.weight_generator(t_embed) # (T, NumTextLayers)
+                w = torch.softmax(w, dim=1)
                 results[f"Layer_{i}"] = w.cpu().numpy()
                 
     elif hasattr(model, "text_fusion_module") and model.text_fusion_module is not None:
@@ -99,6 +100,7 @@ def visualize(args):
         with torch.no_grad():
             t_embed = module._time_embedding(t_input)
             w = module.weight_generator(t_embed)
+            w = torch.softmax(w, dim=1) # (T, NumTextLayers)
             results["Global"] = w.cpu().numpy()
             
     elif hasattr(model, "text_fusion_weights") and model.text_fusion_weights is not None:
@@ -163,9 +165,9 @@ def visualize(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize AdaFuseDiT fusion weights")
-    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/115000", help="Path to the checkpoint (file or folder)")
-    parser.add_argument("--config", type=str, default="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-4machine.yaml", help="Path to the model config file (.yaml)")
-    parser.add_argument("--output_dir", type=str, default="visual/fusion_plots_115000", help="Directory to save plots")
+    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-new/checkpoint-305000/pytorch_model", help="Path to the checkpoint (file or folder)")
+    parser.add_argument("--config", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml", help="Path to the model config file (.yaml)")
+    parser.add_argument("--output_dir", type=str, default="visual/fusion_plots_305000", help="Directory to save plots")
     parser.add_argument("--num_timesteps", type=int, default=10, help="Number of timestep curves to plot")
     
     args = parser.parse_args()

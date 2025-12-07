@@ -6,6 +6,7 @@ import math
 import os
 import random
 import shutil
+import time
 from tqdm import tqdm
 
 from accelerate import Accelerator
@@ -33,6 +34,30 @@ if is_wandb_available():
     import wandb
 
 logger = get_logger(__name__)
+
+
+class ProfileTimer:
+    """简单的计时上下文管理器"""
+    def __init__(self, name, stats_dict=None, enabled=True):
+        self.name = name
+        self.stats_dict = stats_dict
+        self.enabled = enabled
+        self.start = 0
+
+    def __enter__(self):
+        if self.enabled:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        if self.enabled:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elapsed = time.time() - self.start
+            if self.stats_dict is not None:
+                self.stats_dict[self.name] = elapsed
 
 
 def seed_everything(seed):
@@ -111,7 +136,7 @@ class Trainer(ABC):
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-        model_input = model_input.to(dtype=self.weight_dtype)
+        #model_input = model_input.to(dtype=self.weight_dtype)
 
         noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
@@ -126,8 +151,8 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.accelerator.device)
-        noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
+        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=torch.float32).to(self.accelerator.device)
+        noisy_model_input = (1.0 - sigmas) * model_input.float() + sigmas * noise.float()
         noisy_model_input = noisy_model_input.to(dtype=self.weight_dtype)
         
         output = self.model(
@@ -139,14 +164,14 @@ class Trainer(ABC):
         model_pred = output
 
         if self.hparams.trainer.precondition_outputs:
-            model_pred = model_pred * (-sigmas) + noisy_model_input
+            model_pred = model_pred * (-sigmas.to(dtype=model_pred.dtype)) + noisy_model_input
 
         weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
-            target = noise - model_input
+            target = noise.float() - model_input.float()
 
         loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
         loss = loss.mean()
@@ -171,7 +196,7 @@ class Trainer(ABC):
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-        model_input = model_input.to(dtype=self.weight_dtype)
+        #model_input = model_input.to(dtype=self.weight_dtype)
 
         noise = torch.randn_like(model_input)
         bsz = model_input.shape[0]
@@ -186,8 +211,8 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.accelerator.device)
-        noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
+        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=torch.float32).to(self.accelerator.device)
+        noisy_model_input = (1.0 - sigmas) * model_input.float() + sigmas * noise.float()
         noisy_model_input = noisy_model_input.to(dtype=self.weight_dtype)
         
         output = self.model(
@@ -200,14 +225,14 @@ class Trainer(ABC):
         model_pred = output[0]
 
         if self.hparams.trainer.precondition_outputs:
-            model_pred = model_pred * (-sigmas) + noisy_model_input
+            model_pred = model_pred * (-sigmas.to(dtype=model_pred.dtype)) + noisy_model_input
 
         weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
-            target = noise - model_input
+            target = noise.float() - model_input.float()
 
         loss = torch.mean((weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
         loss = loss.mean()
@@ -251,7 +276,7 @@ class Trainer(ABC):
         with torch.no_grad():
             model_input = self.vae.encode(model_input.float()).latent_dist.sample()
         model_input = (model_input - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-        model_input = model_input.to(dtype=self.weight_dtype)
+        #model_input = model_input.to(dtype=self.weight_dtype)
 
         noise = torch.randn_like(model_input)
 
@@ -265,8 +290,8 @@ class Trainer(ABC):
         indices = (u * self.noise_scheduler.config.num_train_timesteps).long()
         timesteps = self.noise_scheduler.timesteps[indices]
 
-        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype).to(self.accelerator.device)
-        noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
+        sigmas = self.get_sigmas(timesteps, n_dim=model_input.ndim, dtype=torch.float32).to(self.accelerator.device)
+        noisy_model_input = (1.0 - sigmas) * model_input.float() + sigmas * noise.float()
         noisy_model_input = noisy_model_input.to(dtype=self.weight_dtype)
 
         model_pred = self.model(
@@ -277,14 +302,14 @@ class Trainer(ABC):
         )
 
         if self.hparams.trainer.precondition_outputs:
-            model_pred = model_pred * (-sigmas) + noisy_model_input
+            model_pred = model_pred * (-sigmas.to(dtype=model_pred.dtype)) + noisy_model_input
 
         weighting = compute_loss_weighting_for_sd3(weighting_scheme=self.hparams.trainer.weighting_scheme, sigmas=sigmas)
 
         if self.hparams.trainer.precondition_outputs:
             target = model_input
         else:
-            target = noise - model_input
+            target = noise.float() - model_input.float()
 
         loss = torch.mean(
             (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1
@@ -331,6 +356,8 @@ class Trainer(ABC):
         starting_epoch = self.global_step // num_update_steps_per_epoch
         resume_step = self.global_step % num_update_steps_per_epoch
 
+        profile_stats = {}
+
         for epoch in range(starting_epoch, num_train_epochs):
             if epoch == starting_epoch and resume_step > 0:
                 active_dataloader = self.accelerator.skip_first_batches(
@@ -342,11 +369,24 @@ class Trainer(ABC):
             else:
                 active_dataloader = self.train_dataloader
             
+            t0 = time.time()
             for step, batch in enumerate(active_dataloader):
+                profile_stats["Data"] = time.time() - t0
+                
+                do_profile = self.accelerator.is_main_process and (self.global_step % 10 == 0)
+
                 with self.accelerator.accumulate(self.model):
-                    loss = self.training_step(batch)
-                    self.backward(loss)
-                    self.optimizer_step()
+                    with ProfileTimer("Forward", profile_stats, do_profile):
+                        loss = self.training_step(batch)
+                    with ProfileTimer("Backward", profile_stats, do_profile):
+                        self.backward(loss)
+                    with ProfileTimer("Optim", profile_stats, do_profile):
+                        self.optimizer_step()
+
+                if do_profile:
+                    sync_status = "Sync" if self.accelerator.sync_gradients else "NoSync"
+                    msg = f"⏱️ [{sync_status}][Step {self.global_step}] " + " | ".join([f"{k}: {v:.3f}s" for k, v in profile_stats.items()])
+                    print(msg)
 
                 if self.accelerator.sync_gradients:
                     self.global_step += 1
@@ -365,6 +405,8 @@ class Trainer(ABC):
 
                     if self.global_step >= self.hparams.trainer.max_steps:
                         break
+                
+                t0 = time.time()
             
             if self.global_step >= self.hparams.trainer.max_steps:
                 break
@@ -481,7 +523,8 @@ class AccelerateTrainer(Trainer):
                 self.llm.to(device, dtype=self.weight_dtype)
                 
                 # 预计算 LLM 的 position_ids 和 attention_mask
-                max_seq_len = hparams.data.max_prompt_length + getattr(hparams.data, 'instruction_length', 0)
+                max_seq_len = hparams.data.max_prompt_length 
+                
                 self._cached_position_ids = torch.arange(max_seq_len, device=device).unsqueeze(0)
                 self._cached_llm_attn_mask = update_self_attention_mask(
                     torch.ones(1, max_seq_len, device=device, dtype=torch.long),
