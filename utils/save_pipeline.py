@@ -16,7 +16,24 @@ from diffusion.models import DiT, FuseDiT, AdaFuseDiT
 from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWithCLIP, AdaFuseDiTPipeline
 
 
+def get_torch_dtype(dtype_str):
+    """将字符串转换为 torch dtype"""
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+    }
+    return dtype_map.get(dtype_str.lower(), torch.bfloat16)
+
+
 def main(args):
+    # 确定权重精度
+    weight_dtype = get_torch_dtype(args.dtype)
+    print(f"Using weight dtype: {weight_dtype}")
+    
     if args.trainer == "deepspeed":
         checkpoint_dir = args.checkpoint
         tag = args.tag
@@ -70,6 +87,10 @@ def main(args):
         transformer = AdaFuseDiT(config)
         transformer.load_state_dict(state_dict)
 
+    # 将 transformer 转换为目标精度，与训练代码保持一致
+    transformer = transformer.to(dtype=weight_dtype)
+    print(f"Transformer converted to {weight_dtype}")
+
     # Determine tokenizer/LLM path
     model_path = args.llm_path
     if model_path is None:
@@ -79,8 +100,6 @@ def main(args):
     if not model_path:
         print("Warning: `_name_or_path` in config is empty and `--llm_path` was not provided.")
         print("Please provide the path to the LLM/Tokenizer using `--llm_path`.")
-        # We can't proceed reliably without a path, but let's try to let the user know.
-        # If we continue, from_pretrained('') will fail.
     
     print(f"Loading tokenizer and LLM from: {model_path}")
     try:
@@ -93,7 +112,7 @@ def main(args):
 
     try:
         from transformers import AutoModelForCausalLM
-        lm = AutoModelForCausalLM.from_pretrained(model_path)
+        lm = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=weight_dtype)
         lm = lm.model if hasattr(lm, "model") else lm
     except Exception:
         lm = None
@@ -102,15 +121,21 @@ def main(args):
         # 2) Try vision-language models and extract the language sub-module
         try:
             from transformers import AutoModelForImageTextToText
-            vl = AutoModelForImageTextToText.from_pretrained(model_path)
+            vl = AutoModelForImageTextToText.from_pretrained(model_path, torch_dtype=weight_dtype)
             for attr in ["language_model", "text_model", "model"]:
                 if hasattr(vl, attr):
                     lm = getattr(vl, attr)
+                    # 对于 language_model，可能还需要取 .model
+                    if hasattr(lm, "model"):
+                        lm = lm.model
                     break
         except Exception as e:
             raise ValueError(f"Unknown model: {model_path}") from e
 
-
+    # 确保 LLM 使用正确的精度
+    if lm is not None:
+        lm = lm.to(dtype=weight_dtype)
+        print(f"LLM converted to {weight_dtype}")
 
     if args.type == "baseline-dit":
         pipeline = DiTPipeline(
@@ -148,6 +173,7 @@ def main(args):
         raise ValueError(f"Unknown type: {args.type}")
     
     pipeline.save_pretrained(os.path.join(args.checkpoint, "pipeline"))
+    print(f"Pipeline saved to {os.path.join(args.checkpoint, 'pipeline')}")
 
 
 if __name__ == "__main__":
@@ -163,5 +189,8 @@ if __name__ == "__main__":
     parser.add_argument("--t5", type=str, default="stabilityai/stable-diffusion-3-medium-diffusers")
     parser.add_argument("--llm_path", type=str, default=None, help="Path to the LLM/Tokenizer")
     parser.add_argument("--compression", action="store_true")
+    parser.add_argument("--dtype", type=str, default="bfloat16", 
+                        choices=["float32", "fp32", "float16", "fp16", "bfloat16", "bf16"],
+                        help="Weight dtype for transformer and LLM (default: bfloat16, matching training)")
     args = parser.parse_args()
     main(args)
