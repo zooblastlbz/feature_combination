@@ -32,7 +32,7 @@ model:
   pos_embed: "1d-rope"
   qk_norm: true
   sandwich_norm: false
-  timestep_conditioning: "addition"
+  timestep_conditioning: "adaln-zero"
   
   # === AdaFuseDiT 特有配置 ===
   # 模式 4: 每层独立时间自适应权重（最灵活）
