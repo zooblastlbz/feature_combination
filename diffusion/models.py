@@ -347,7 +347,7 @@ class DiT(PreTrainedModel):
         width = width // patch_size
 
         hidden_states = self.patch_embed(hidden_states)
-
+        
         if self.config.timestep_conditioning is not None:
             timestep = self.time_proj(timestep).to(hidden_states.dtype)
             timestep = self.timestep_embedder(timestep)
