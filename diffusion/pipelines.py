@@ -214,10 +214,10 @@ class FuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
 
         if self.do_classifier_free_guidance:
             if negative_prompt is None:
-                negative_prompt = [""]
+                negative_prompt = [instruction]
             elif isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt]
-            prompt = batch_size * negative_prompt + prompt
+                negative_prompt = [instruction+negative_prompt]
+            prompt = batch_size * negative_prompt + prompt 
 
         instruction_length = self.tokenizer(
             instruction.rstrip(),
@@ -743,9 +743,9 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
 
         if self.do_classifier_free_guidance:
             if negative_prompt is None:
-                negative_prompt = [""]
+                negative_prompt = [instruction]
             elif isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt]
+                negative_prompt = [instruction+negative_prompt]
             prompt = batch_size * negative_prompt + prompt 
 
         tokenized = self.tokenizer(
@@ -772,8 +772,8 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         )[1][self.transformer.config.text_hidden_states_index].to(dtype=self.transformer.dtype)
         attention_mask = attention_mask
 
-        attention_mask_float = attention_mask.to(dtype=text_hidden_states.dtype).unsqueeze(-1)
-        text_modulation_embeds = (text_hidden_states * attention_mask_float).sum(dim=1) / attention_mask_float.sum(dim=1)
+        #attention_mask_float = attention_mask.to(dtype=text_hidden_states.dtype).unsqueeze(-1)
+        #text_modulation_embeds = (text_hidden_states * attention_mask_float).sum(dim=1) / attention_mask_float.sum(dim=1)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
@@ -800,7 +800,9 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
                     continue
 
                 # expand the latents if we are doing classifier free guidance
+               
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
 
@@ -808,9 +810,10 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
                     hidden_states=latent_model_input,
                     timestep=timestep,
                     text_hidden_states=text_hidden_states,
-                    text_modulation_embeds=text_modulation_embeds,
+                    #text_modulation_embeds=text_modulation_embeds,
                     attention_mask=attention_mask,
-                )[0]
+                )
+                
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
@@ -819,6 +822,7 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
+              
                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
                 if latents.dtype != latents_dtype:
@@ -1012,9 +1016,9 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
 
         if self.do_classifier_free_guidance:
             if negative_prompt is None:
-                negative_prompt = [""]
+                negative_prompt = [instruction]
             elif isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt]
+                negative_prompt = [instruction+negative_prompt]
             prompt = batch_size * negative_prompt + prompt 
 
         # 3. Encode text prompts

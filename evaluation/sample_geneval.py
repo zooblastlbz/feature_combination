@@ -18,7 +18,7 @@ from diffusion.pipelines import DiTPipeline, FuseDiTPipeline, FuseDiTPipelineWit
 
 
 def load_pipeline(model_type: str, ckpt_path: str, dtype):
-    if model_type == "baseline-dit":
+    if model_type == "dit":
         pipeline = DiTPipeline.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
     elif model_type == "fuse-dit":
         pipeline = FuseDiTPipeline.from_pretrained(ckpt_path, torch_dtype=dtype).to("cuda")
@@ -50,7 +50,10 @@ def generate(opt):
     distributed_state = PartialState()
     with distributed_state.split_between_processes(list(enumerate(metadatas))) as samples:
         for model in tqdm(opt.pipeline.ckpt_path):
-            pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
+            if opt.pipeline.use_ema:
+                pipe= load_pipeline(opt.pipeline.model_type, os.path.join(model, "ema_pipeline"), torch_dtype)
+            else:
+                pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
             for index, metadata in tqdm(samples):
                 outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}", f"{index:0>5}")
                 os.makedirs(outpath, exist_ok=True)
