@@ -28,7 +28,7 @@ def sample(args, data_dict):
         raise ValueError(f"Unknown dtype: {args.dtype}")
 
     distributed_state = PartialState()
-    if args.model_type == "baseline-dit":
+    if args.model_type == "dit":
         pipeline = DiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
     elif args.model_type == "fuse-dit":
         pipeline = FuseDiTPipeline.from_pretrained(args.checkpoint, torch_dtype=torch_dtype).to("cuda")
