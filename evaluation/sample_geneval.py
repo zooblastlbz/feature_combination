@@ -51,11 +51,14 @@ def generate(opt):
     with distributed_state.split_between_processes(list(enumerate(metadatas))) as samples:
         for model in tqdm(opt.pipeline.ckpt_path):
             if opt.pipeline.use_ema:
-                pipe= load_pipeline(opt.pipeline.model_type, os.path.join(model, "ema_pipeline"), torch_dtype)
+                pipe= load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline_ema"), torch_dtype)
             else:
                 pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
             for index, metadata in tqdm(samples):
-                outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}", f"{index:0>5}")
+                if opt.pipeline.use_ema:
+                    outpath = os.path.join(model,  f"geneval-ema-{int(opt.gen.scale)}", f"{index:0>5}")
+                else:
+                    outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}", f"{index:0>5}")
                 os.makedirs(outpath, exist_ok=True)
 
                 prompt = metadata['prompt']
