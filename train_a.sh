@@ -1,3 +1,5 @@
+
+
 #!/bin/bash
 set -x
 
@@ -5,32 +7,38 @@ export OMPI_ALLOW_RUN_AS_ROOT=1
 export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 mpirun --hostfile /etc/mpi/hostfile --pernode -x PATH sh -c 'rm -f /dev/shm/nccl-*'
 
+
+
+rm -f .deepspeed_env
+rm -f /root/.deepspeed_env
+
 export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
 
-# ===== Accelerate + DeepSpeed ZeRO-2 多机多卡配置 =====
-NNODES=4
-NPROC_PER_NODE=8
-MIXED_PRECISION="bf16"
-
-# 从 hostfile 获取主节点地址
+cp /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_a800 /root/.deepspeed_env
+set -a 
+source /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_a800
+set +a
+# 从 hostfile 获取主节点 IP
 HOSTFILE=/etc/mpi/hostfile
-MASTER_ADDR=$(head -n 1 ${HOSTFILE} | cut -d' ' -f1)
-MASTER_PORT=29500
+MASTER_ADDR=$(head -n 1 ${HOSTFILE} | awk '{print $1}')
+MASTER_PORT=30001
+
+e
+echo "🚀 Master Address: ${MASTER_ADDR}:${MASTER_PORT}"
 
 # 配置文件路径
-CONFIG_FILE=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-4machine.yaml
-ACCELERATE_CONFIG=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/accelerate_config.yaml
-
+#CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml
+ACCELERATE_CONFIG=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/accelerate_config.yaml
+CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/baseline.yaml
+CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-layerwise.yaml
 # Python 环境
 PYTHON_BIN=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin
 
 # 使用 accelerate launch + DeepSpeed ZeRO-2 启动多机多卡训练
+# --main_process_ip 和 --main_process_port 会覆盖配置文件中的值
 ${PYTHON_BIN}/accelerate launch \
     --config_file ${ACCELERATE_CONFIG} \
-    --num_machines ${NNODES} \
-    --num_processes $((NNODES * NPROC_PER_NODE)) \
     --main_process_ip ${MASTER_ADDR} \
     --main_process_port ${MASTER_PORT} \
-    --machine_rank ${RANK:-0} \
     train.py \
     -c ${CONFIG_FILE}

@@ -11,6 +11,23 @@ sys.path.append(os.getcwd())
 
 from diffusion.models import build_model
 
+
+def _parse_layer_list(layer_str):
+    """Parse a comma-separated layer list like '0,3,5' into a set of ints."""
+    if not layer_str:
+        return None
+    layers = []
+    for part in layer_str.split(","):
+        part = part.strip()
+        if part == "":
+            continue
+        try:
+            layers.append(int(part))
+        except ValueError:
+            raise ValueError(f"Invalid layer id '{part}' in --layers, must be integers separated by commas")
+    return set(layers)
+
+
 def load_checkpoint(model, checkpoint_path):
     print(f"Loading checkpoint from {checkpoint_path}...")
     state_dict = None
@@ -89,18 +106,23 @@ def visualize(args):
         print("Detected Layer-wise Adaptive Fusion")
         for i, module in enumerate(model.text_fusion_modules):
             with torch.no_grad():
-                t_embed = module._time_embedding(t_input)
-                w = module.weight_generator(t_embed) # (T, NumTextLayers)
-                w = torch.softmax(w, dim=1)
+                # Use module forward to get weights; weights only depend on timestep embedding.
+                dummy_hidden = [
+                    torch.zeros(1, 1, module.feature_dim, device=t_input.device, dtype=t_input.dtype)
+                    for _ in range(module.num_layers)
+                ]
+                _, w = module(dummy_hidden, t_input)  # (T, num_text_layers)
                 results[f"Layer_{i}"] = w.cpu().numpy()
                 
     elif hasattr(model, "text_fusion_module") and model.text_fusion_module is not None:
         print("Detected Global Adaptive Fusion")
         module = model.text_fusion_module
         with torch.no_grad():
-            t_embed = module._time_embedding(t_input)
-            w = module.weight_generator(t_embed)
-            w = torch.softmax(w, dim=1) # (T, NumTextLayers)
+            dummy_hidden = [
+                torch.zeros(1, 1, module.feature_dim, device=t_input.device, dtype=t_input.dtype)
+                for _ in range(module.num_layers)
+            ]
+            _, w = module(dummy_hidden, t_input)
             results["Global"] = w.cpu().numpy()
             
     elif hasattr(model, "text_fusion_weights") and model.text_fusion_weights is not None:
@@ -118,50 +140,72 @@ def visualize(args):
         print("No fusion modules found in model. Is this AdaFuseDiT?")
         return
 
+    # Filter for requested DiT layers when layer-wise fusion is present
+    requested_layers = _parse_layer_list(args.layers)
+    if requested_layers is not None:
+        filtered = {}
+        for key, weights in results.items():
+            if key.startswith("Layer_"):
+                try:
+                    idx = int(key.split("_")[1])
+                except Exception:
+                    continue
+                if idx not in requested_layers:
+                    continue
+            filtered[key] = weights
+        if not filtered:
+            print(f"No matching layers found for --layers={args.layers}. Available: {list(results.keys())}")
+            return
+        results = filtered
+        print(f"Plotting only layers: {sorted(list(requested_layers))}")
+
     # Plotting
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Use a colormap
     cm = plt.get_cmap("viridis")
     
+    # Save CSVs for reference
     for key, weights in results.items():
-        # Save to CSV
         num_text_layers = weights.shape[1]
         csv_filename = f"fusion_weights_{key}.csv"
         csv_path = os.path.join(args.output_dir, csv_filename)
-        
-        # Prepare header
         header = "Timestep," + ",".join([f"TextLayer_{i}" for i in range(num_text_layers)])
-        
-        # Prepare data with timestep column
         t_np = timesteps.cpu().numpy()
         data_to_save = np.column_stack((t_np, weights))
-        
         np.savetxt(csv_path, data_to_save, delimiter=",", header=header, comments="", fmt="%.6f")
         print(f"Saved weights to {csv_path}")
 
-        plt.figure(figsize=(30, 18))
-        # weights: (T, N)
+    # Combined figure with one subplot per key/layer
+    num_plots = len(results)
+    cols = min(4, num_plots) if num_plots > 1 else 1
+    rows = (num_plots + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 4 * rows), squeeze=False)
+    axes = axes.flatten()
+
+    for ax_idx, (key, weights) in enumerate(results.items()):
+        ax = axes[ax_idx]
         num_text_layers = weights.shape[1]
         x = np.arange(num_text_layers)
-        
         for t_idx, t_val in enumerate(timesteps):
             color = cm(t_idx / (len(timesteps) - 1) if len(timesteps) > 1 else 0.5)
-            plt.plot(x, weights[t_idx], label=f"t={int(t_val)}", color=color, marker='o', markersize=4)
-            
-        plt.xlabel("Text Encoder Layer Index")
-        plt.ylabel("Fusion Weight (Softmax)")
-        plt.title(f"Fusion Weights - {key}")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(x) # Ensure integer ticks for layers
-        plt.tight_layout()
-        
-        filename = f"fusion_weights_{key}.pdf"
-        save_path = os.path.join(args.output_dir, filename)
-        plt.savefig(save_path)
-        plt.close()
-        print(f"Saved plot to {save_path}")
+            ax.plot(x, weights[t_idx], label=f"t={int(t_val)}", color=color, marker='o', markersize=3)
+        ax.set_xlabel("Text Encoder Layer Index")
+        ax.set_ylabel("Fusion Weight (Softmax)")
+        ax.set_title(f"{key}")
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(x)
+        ax.legend(fontsize=8)
+
+    # Hide any unused subplots
+    for j in range(num_plots, len(axes)):
+        fig.delaxes(axes[j])
+
+    fig.tight_layout()
+    combined_path = os.path.join(args.output_dir, "fusion_weights_layers.pdf")
+    fig.savefig(combined_path)
+    plt.close(fig)
+    print(f"Saved combined plot to {combined_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize AdaFuseDiT fusion weights")
@@ -169,6 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml", help="Path to the model config file (.yaml)")
     parser.add_argument("--output_dir", type=str, default="visual/fusion_plots_305000", help="Directory to save plots")
     parser.add_argument("--num_timesteps", type=int, default=10, help="Number of timestep curves to plot")
+    parser.add_argument("--layers", type=str, default=None, help="Comma-separated DiT layer ids to plot (only for layer-wise fusion). If omitted, all layers are plotted.")
     
     args = parser.parse_args()
     visualize(args)
