@@ -1,7 +1,8 @@
 pipeline:
   model_type: "adafusedit"
-  ckpt_path: ["/ytech_m2v5_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise/"]
+  ckpt_path: ["/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-baseline-norm/checkpoint-150000"]
   dtype: "bf16"
+  use_ema: false
 gen:
   metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/geneval/prompts/evaluation_metadata.jsonl" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl
   batch_size: 16
@@ -11,5 +12,5 @@ gen:
   W: 256
   scale: 6.0
   steps: 25
-  negative_prompt: null
-  instruction: ""
+  negative_prompt: "ugly, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face"
+  instruction: "Describe this image."
