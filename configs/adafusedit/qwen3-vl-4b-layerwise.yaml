@@ -15,7 +15,7 @@ trainer:
   mode_scale: 1.29
   precondition_outputs: false
   project: "AdaFuseDiT"
-  resume_from: null
+  resume_from: "latest"
   run: "256-AdaFuseDiT-timewise-layerwise"
   seed: 42
   train_dit: true
