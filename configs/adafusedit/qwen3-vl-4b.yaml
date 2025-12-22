@@ -1,6 +1,6 @@
 trainer:
   cache_dir: "../.cache/torch_xla"
-  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-new"
+  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-LNzero"
   checkpointing_steps: 5000
   consolidation_steps: 50000
   enable_gradient_checkpointing: false
@@ -15,8 +15,8 @@ trainer:
   mode_scale: 1.29
   precondition_outputs: false
   project: "AdaFuseDiT"
-  resume_from: null
-  run: "256-AdaFuseDiT-timewise-new"
+  resume_from: "latest"
+  run: "256-AdaFuseDiT-timewise-LNzero"
   seed: 42
   train_dit: true
   train_llm: false
