@@ -9,7 +9,9 @@ rm -f .deepspeed_env
 rm -f /root/.deepspeed_env
 
 export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
-export WANDB_RUN_ID="tkj72h4f"
+export WANDB_RUN_ID="tkj72h4f" #layerwise
+export WANDB_RUN_ID="n21xhb32" #baseline
+export TORCH_DISTRIBUTED_TIMEOUT=1800
 cp /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_h800 /root/.deepspeed_env
 set -a 
 source /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_h800
@@ -27,7 +29,7 @@ ACCELERATE_CONFIG=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combinatio
 CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/baseline.yaml
 # Python 环境
 PYTHON_BIN=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin
-CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-layerwise.yaml
+#CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-layerwise.yaml
 # Python 环境
 # 使用 accelerate launch + DeepSpeed ZeRO-2 启动多机多卡训练
 # --main_process_ip 和 --main_process_port 会覆盖配置文件中的值
