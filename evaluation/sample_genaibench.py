@@ -49,8 +49,12 @@ def generate(opt):
         raise ValueError(f"Unknown dtype: {dtype_str}")
 
     distributed_state = PartialState()
+    
     with distributed_state.split_between_processes(prompts) as samples:
         for model in tqdm(opt.pipeline.ckpt_path):
+            output_dir=os.path.join(model, f"genaibench-{int(opt.gen.scale)}")
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
             os.makedirs(os.path.join(model, f"genaibench-{int(opt.gen.scale)}"), exist_ok=True)
             pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
             for sample in tqdm(samples):
@@ -72,8 +76,8 @@ def generate(opt):
                     )[0]
                 
                 image=images[0]
-                id=sample[0]
-                image.save(os.path.join(model, f"genaibench-{opt.gen.scale}", f"{id}.png"))
+                id=sample['id']
+                image.save(os.path.join(output_dir, f"{id}.png"))
 
 
 def main(config_file):
