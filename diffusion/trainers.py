@@ -370,7 +370,18 @@ class Trainer(ABC):
                 active_dataloader = self.train_dataloader
             
             t0 = time.time()
-            for step, batch in enumerate(active_dataloader):
+            data_iter = iter(active_dataloader)
+            while True:
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    break
+                except Exception as e:
+                    if self.accelerator.is_main_process:
+                        print(f"⚠️ 跳过一个 batch（取数异常），】：{e}")
+                    t0 = time.time()
+                    continue
+
                 profile_stats["Data"] = time.time() - t0
                 
                 do_profile = self.accelerator.is_main_process and (self.global_step % 10 == 0)
@@ -437,12 +448,16 @@ class AccelerateTrainer(Trainer):
         if mixed_precision == "fp32":
             mixed_precision = "no"
 
+
+        from datetime import timedelta
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=hparams.trainer.gradient_accumulation_steps,
-            mixed_precision=mixed_precision,
-            log_with="wandb" if is_wandb_available() else None,
+            gradient_accumulation_steps=...,
+            mixed_precision=...,
+            log_with=...,
             project_config=project_config,
+            ddp_timeout=timedelta(seconds=1800),  # 把超时调到 30 分钟
         )
+
 
         if hparams.trainer.seed is not None:
             set_seed(hparams.trainer.seed)

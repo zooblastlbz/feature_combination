@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 sys.path.append(os.getcwd())
 
 from diffusion.models import build_model
+from diffusion.pipelines import AdaFuseDiTPipeline
 
 
 def _parse_layer_list(layer_str):
@@ -69,6 +70,25 @@ def load_checkpoint(model, checkpoint_path):
     missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
     print(f"Checkpoint loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
 
+
+def load_from_pipeline(checkpoint_path):
+    """Load model from a saved pipeline directory."""
+    print(f"Loading pipeline from {checkpoint_path}...")
+    pipeline = AdaFuseDiTPipeline.from_pretrained(checkpoint_path)
+    model = pipeline.transformer
+    print("Pipeline loaded successfully.")
+    return model
+
+
+def is_pipeline_dir(checkpoint_path):
+    """Check if the path is a Hugging Face pipeline directory."""
+    if not os.path.isdir(checkpoint_path):
+        return False
+    # Check for typical Hugging Face pipeline files
+    indicators = ["model_index.json", "config.json", "pytorch_model.bin", "model.safetensors"]
+    return any(os.path.exists(os.path.join(checkpoint_path, f)) for f in indicators)
+
+
 def visualize(args):
     # Load config
     print(f"Loading config from {args.config}...")
@@ -82,24 +102,25 @@ def visualize(args):
             
     hparams = HParams(config)
     
-    # Build model
-    print("Building model...")
-    # We can try to avoid loading the heavy LLM if we only need DiT weights,
-    # but build_model is coupled. We'll just load it.
-    model = build_model(hparams)
-    model.eval()
+    # Build or load model
+    if is_pipeline_dir(args.checkpoint):
+        print("Detected pipeline directory, loading from pipeline...")
+        model = load_from_pipeline(args.checkpoint)
+    else:
+        print("Building model from config and loading checkpoint...")
+        model = build_model(hparams)
+        load_checkpoint(model, args.checkpoint)
     
-    # Load weights
-    load_checkpoint(model, args.checkpoint)
+    model.eval()
     
     # Prepare timesteps
     # Generate timesteps from 0 to 1000
     timesteps = torch.linspace(0, 1000, args.num_timesteps).long()
     # AdaFuseDiT uses normalized timesteps [0, 1] for the fusion module
     t_input = timesteps.float() / 1000.0
-    t_input = t_input.to(model.device) # Model might be on CPU, which is fine
+    t_input = t_input.to(model.device)  # Model might be on CPU, which is fine
     
-    results = {} # key -> weights (T, NumTextLayers)
+    results = {}  # key -> weights (T, NumTextLayers)
     
     print("Extracting fusion weights...")
     if hasattr(model, "text_fusion_modules") and model.text_fusion_modules is not None:
@@ -209,11 +230,11 @@ def visualize(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize AdaFuseDiT fusion weights")
-    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-new/checkpoint-305000/pytorch_model", help="Path to the checkpoint (file or folder)")
-    parser.add_argument("--config", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml", help="Path to the model config file (.yaml)")
-    parser.add_argument("--output_dir", type=str, default="visual/fusion_plots_305000", help="Directory to save plots")
+    parser.add_argument("--checkpoint", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-layerwise/checkpoint-400000/pytorch_model", help="Path to the checkpoint (file or folder)")
+    parser.add_argument("--config", type=str, default="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b-layerwise.yaml", help="Path to the model config file (.yaml)")
+    parser.add_argument("--output_dir", type=str, default="visual/layerwise_fusion_plots_40w_", help="Directory to save plots")
     parser.add_argument("--num_timesteps", type=int, default=10, help="Number of timestep curves to plot")
-    parser.add_argument("--layers", type=str, default=None, help="Comma-separated DiT layer ids to plot (only for layer-wise fusion). If omitted, all layers are plotted.")
+    parser.add_argument("--layers", type=str, default="0,8,17,26,35", help="Comma-separated DiT layer ids to plot (only for layer-wise fusion). If omitted, all layers are plotted.")
     
     args = parser.parse_args()
     visualize(args)

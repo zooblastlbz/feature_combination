@@ -320,7 +320,7 @@ def get_dataloader(hparams):
     persistent_workers = getattr(hparams.data, 'persistent_workers', True) and num_workers > 0
     prefetch_factor = getattr(hparams.data, 'prefetch_factor', 4) if num_workers > 0 else None
     pin_memory = getattr(hparams.data, 'pin_memory', True)
-    timeout = getattr(hparams.data, 'dataloader_timeout', 60)
+    timeout = getattr(hparams.data, 'dataloader_timeout', 30)
 
     dataloader = torch.utils.data.DataLoader(
         train_dataset,
