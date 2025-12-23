@@ -449,13 +449,12 @@ class AccelerateTrainer(Trainer):
             mixed_precision = "no"
 
 
-        from datetime import timedelta
+       
         self.accelerator = Accelerator(
             gradient_accumulation_steps=...,
             mixed_precision=...,
             log_with=...,
-            project_config=project_config,
-            ddp_timeout=timedelta(seconds=1800),  # 把超时调到 30 分钟
+            project_config=project_config
         )
 
 
