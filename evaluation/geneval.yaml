@@ -1,12 +1,12 @@
 pipeline:
   model_type: "adafusedit"
-  ckpt_path: ["/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-LNzero/checkpoint-500000"]
+  ckpt_path: ["/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-layerwise/checkpoint-500000"]
   dtype: "bf16"
   use_ema: false
 gen:
-  metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/t2v_metrics/datasets/GenAI-Image-1600/genai_image.json" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl
+  metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/geneval/prompts/evaluation_metadata_cleaned.jsonl" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl
   batch_size: 16
-  n_samples: 1
+  n_samples: 4
   seed: 42
   H: 256
   W: 256
