@@ -64,20 +64,21 @@ def generate(opt):
                 generator = torch.manual_seed(opt.gen.seed)
                 with torch.autocast("cuda", dtype=torch_dtype):
                     images = pipe(
-                        prompt=opt.gen.instruction + prompt,
+                        prompt=prompt,
                         height=opt.gen.H,
                         width=opt.gen.W,
                         num_inference_steps=opt.gen.steps,
                         guidance_scale=opt.gen.scale,
-                        num_images_per_prompt=1,
+                        num_images_per_prompt=opt.gen.n_samples,
                         negative_prompt=opt.gen.negative_prompt or None,
                         generator=generator,
                         instruction=opt.gen.instruction,
                     )[0]
                 
-                image=images[0]
+                
                 id=sample['id']
-                image.save(os.path.join(output_dir, f"{id}.png"))
+                for i, image in enumerate(images):
+                    image.save(os.path.join(output_dir, f"{id}_sample_{i}.png"))
 
 
 def main(config_file):

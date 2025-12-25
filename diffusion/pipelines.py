@@ -186,7 +186,7 @@ class FuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         output_type: Optional[str] = "pil",
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        max_sequence_length: int = 256,
+        max_sequence_length: int = 512,
         use_cache: bool = False,
         instruction: str = "",
     ):
@@ -439,7 +439,7 @@ class FuseDiTPipelineWithCLIP(DiffusionPipeline, FromSingleFileMixin):
         output_type: Optional[str] = "pil",
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        max_sequence_length: int = 256,
+        max_sequence_length: int = 512,
         output_features_type: Optional[str] = None,
         output_features_steps: List[int] = [],
         output_features_layers: List[int] = [],
@@ -714,7 +714,7 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         output_type: Optional[str] = "pil",
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        max_sequence_length: int = 256,
+        max_sequence_length: int = 512,
         use_cache: bool = False,
         instruction: str = "",
     ):
@@ -980,7 +980,7 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         output_type: Optional[str] = "pil",
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        max_sequence_length: int = 256,
+        max_sequence_length: int = 512,
         instruction: str = "",
     ):
         """
@@ -1033,7 +1033,10 @@ class AdaFuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
         attention_mask = tokenized.attention_mask
 
         # 使用与训练代码一致的精度：weight_dtype
-        llm_attention_mask = update_self_attention_mask(attention_mask, 0, False, self.device, weight_dtype)
+        # 训练阶段 LLM 的自注意力 mask 是全 1（不屏蔽 PAD），因此这里也构造全 1 的 attention mask
+        # 以保证训推一致性。
+        llm_attention_mask = torch.ones_like(attention_mask, device=self.device, dtype=torch.long)
+        llm_attention_mask = update_self_attention_mask(llm_attention_mask, 0, False, self.device, weight_dtype)
         position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
 
         # === AdaFuseDiT 核心：提取多层文本特征 ===

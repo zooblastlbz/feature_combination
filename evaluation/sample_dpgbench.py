@@ -53,7 +53,7 @@ def generate(opt):
                 generator = torch.manual_seed(opt.gen.seed)
                 with torch.autocast("cuda", dtype=torch_dtype):
                     images = pipe(
-                        prompt=opt.gen.instruction + prompt,
+                        prompt= prompt,
                         height=opt.gen.H,
                         width=opt.gen.W,
                         num_inference_steps=opt.gen.steps,

@@ -2,6 +2,8 @@ import functools
 import math
 from typing import Optional
 
+from cv2 import norm
+
 from diffusers.models.embeddings import PatchEmbed, Timesteps
 from diffusers.utils import is_torch_xla_available
 from einops import rearrange, repeat
@@ -870,7 +872,7 @@ class AdaFuseDiT(PreTrainedModel):
     def trainable_parameters(self):
         return filter(lambda p: p.requires_grad, self.parameters())
 
-
+from transformers import Qwen3VLTextModel
 class FuseDiT(PreTrainedModel):
     """
     FuseDiT Model.
@@ -887,6 +889,10 @@ class FuseDiT(PreTrainedModel):
             self.llm = GemmaModel(config.base_config)
         elif config.base_config.model_type == "gemma2":
             self.llm = Gemma2Model(config.base_config)
+        elif config.base_config.model_type == "qwen3_vl":
+            self.config.base_config=config.base_config['text_config']
+            self.llm = Qwen3VLTextModel(config.base_config)
+            self.config.base_config.model_type = "qwen3_vl"
         else:
             raise ValueError(f"Model type {config.base_config.model_type} not supported.")
 
@@ -895,7 +901,9 @@ class FuseDiT(PreTrainedModel):
         self.num_key_value_groups = config.base_config.num_attention_heads // config.base_config.num_key_value_heads
 
         self.gradient_checkpointing = False
-
+        if self.config.shared_attention_layers == "even":
+            self.shared_attention_layer_indices = list(range(1, config.text_hidden_states_num, 2))
+    
     def shared_transformer_layer(
         self,
         index: int,
@@ -954,13 +962,23 @@ class FuseDiT(PreTrainedModel):
         dit_value_states = rearrange(dit_value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
         if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
-            llm_query_states = self.llm.layers[index].self_attn.q_proj(norm_llm_hidden_states)
-            llm_key_states = self.llm.layers[index].self_attn.k_proj(norm_llm_hidden_states)
-            llm_value_states = self.llm.layers[index].self_attn.v_proj(norm_llm_hidden_states)
-        
-            llm_query_states = rearrange(llm_query_states, "b n (h d) -> b h n d", h=self.config.base_config.num_attention_heads)
-            llm_key_states = rearrange(llm_key_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
-            llm_value_states = rearrange(llm_value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
+            query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+            key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            if self.config.base_config.model_type == "qwen3_vl":
+                input_shape=norm_llm_hidden_states.shape[:-1]
+                hidden_shape=(*input_shape, -1, self.config.base_config.head_dim)
+                llm_query_states= self.llm.layers[index].self_attn.q_norm(self.llm.layers[index].self_attn.q_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
+                llm_key_states= self.llm.layers[index].self_attn.k_norm(self.llm.layers[index].self_attn.k_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
+                llm_value_states= self.llm.layers[index].self_attn.v_proj(norm_llm_hidden_states).view(hidden_shape).transpose(1, 2)
+            else:
+                llm_query_states = self.llm.layers[index].self_attn.q_proj(norm_llm_hidden_states)
+                llm_key_states = self.llm.layers[index].self_attn.k_proj(norm_llm_hidden_states)
+                llm_value_states = self.llm.layers[index].self_attn.v_proj(norm_llm_hidden_states)
+            
+                llm_query_states = rearrange(llm_query_states, "b n (h d) -> b h n d", h=self.config.base_config.num_attention_heads)
+                llm_key_states = rearrange(llm_key_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
+                llm_value_states = rearrange(llm_value_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
 
         if self.config.qk_norm:
             # Force float32 for qk_norm
@@ -1131,10 +1149,14 @@ class FuseDiT(PreTrainedModel):
                 # Force float32 for llm pre_feedforward_layernorm
                 dtype = llm_hidden_states.dtype
                 norm_llm_hidden_states = self.llm.layers[index].pre_feedforward_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
-            else:
+            elif self.config.base_config.model_type == "gemma":
                 # Force float32 for llm post_attention_layernorm
                 dtype = llm_hidden_states.dtype
                 norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+            elif self.config.base_config.model_type == "qwen3_vl":
+                dtype = llm_hidden_states.dtype
+                norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+                
             llm_mlp_output = self.llm.layers[index].mlp(norm_llm_hidden_states)
             if self.config.base_config.model_type == "gemma2":
                 # Force float32 for llm post_feedforward_layernorm
