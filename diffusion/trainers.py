@@ -451,12 +451,11 @@ class AccelerateTrainer(Trainer):
 
        
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=...,
-            mixed_precision=...,
-            log_with=...,
-            project_config=project_config
+            gradient_accumulation_steps=hparams.trainer.gradient_accumulation_steps,
+            mixed_precision=mixed_precision,
+            log_with="wandb" if is_wandb_available() else None,
+            project_config=project_config,
         )
-
 
         if hparams.trainer.seed is not None:
             set_seed(hparams.trainer.seed)

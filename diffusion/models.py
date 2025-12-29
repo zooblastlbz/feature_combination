@@ -2,7 +2,9 @@ import functools
 import math
 from typing import Optional
 
-from cv2 import norm
+from altair import layer
+
+
 
 from diffusers.models.embeddings import PatchEmbed, Timesteps
 from diffusers.utils import is_torch_xla_available
@@ -889,10 +891,10 @@ class FuseDiT(PreTrainedModel):
             self.llm = GemmaModel(config.base_config)
         elif config.base_config.model_type == "gemma2":
             self.llm = Gemma2Model(config.base_config)
-        elif config.base_config.model_type == "qwen3_vl":
-            self.config.base_config=config.base_config['text_config']
+        elif config.base_config.model_type == "qwen3_vl_text":
+           
             self.llm = Qwen3VLTextModel(config.base_config)
-            self.config.base_config.model_type = "qwen3_vl"
+            
         else:
             raise ValueError(f"Model type {config.base_config.model_type} not supported.")
 
@@ -902,11 +904,12 @@ class FuseDiT(PreTrainedModel):
 
         self.gradient_checkpointing = False
         if self.config.shared_attention_layers == "even":
-            self.shared_attention_layer_indices = list(range(1, config.text_hidden_states_num, 2))
+            self.shared_attention_layers = str([i for i in range(1, config.text_hidden_states_num, 2)])
     
     def shared_transformer_layer(
         self,
-        index: int,
+        dit_layer_index: int,
+        llm_layer_index: int,
         dit_hidden_states: torch.FloatTensor,
         llm_hidden_states: torch.FloatTensor,
         temb: torch.FloatTensor,
@@ -926,12 +929,12 @@ class FuseDiT(PreTrainedModel):
                 dit_shift_mlp,
                 dit_scale_mlp,
                 dit_gate_mlp,
-            ) = self.dit.layers[index - self.config.initial_layers].input_layernorm(dit_hidden_states, emb=temb)
+            ) = self.dit.layers[dit_layer_index].input_layernorm(dit_hidden_states, emb=temb)
             dit_scale_msa = dit_shift_msa = torch.zeros_like(temb) # Dummy values.
         else:
             # Force float32 for input_layernorm
             dtype = dit_hidden_states.dtype
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].input_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
+            norm_dit_hidden_states = self.dit.layers[dit_layer_index].input_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
             if self.config.timestep_conditioning == "adaln-single":
                 (
                     dit_shift_msa,
@@ -940,7 +943,7 @@ class FuseDiT(PreTrainedModel):
                     dit_shift_mlp,
                     dit_scale_mlp,
                     dit_gate_mlp
-                ) = (self.dit.layers[index - self.config.initial_layers].scale_shift_table + temb).chunk(6, dim=1)
+                ) = (self.dit.layers[dit_layer_index].scale_shift_table + temb).chunk(6, dim=1)
             else:
                 dit_shift_msa = dit_scale_msa = dit_shift_mlp = dit_scale_mlp = torch.zeros_like(temb)
                 dit_gate_msa = dit_gate_mlp = torch.ones_like(temb)
@@ -949,13 +952,13 @@ class FuseDiT(PreTrainedModel):
         if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
             # Force float32 for llm input_layernorm
             dtype = llm_hidden_states.dtype
-            norm_llm_hidden_states = self.llm.layers[index].input_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+            norm_llm_hidden_states = self.llm.layers[llm_layer_index].input_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
 
         ########## Self Attention Begins ##########
 
-        dit_query_states = self.dit.layers[index - self.config.initial_layers].self_attn.q_proj(norm_dit_hidden_states)
-        dit_key_states = self.dit.layers[index - self.config.initial_layers].self_attn.k_proj(norm_dit_hidden_states)
-        dit_value_states = self.dit.layers[index - self.config.initial_layers].self_attn.v_proj(norm_dit_hidden_states)
+        dit_query_states = self.dit.layers[dit_layer_index].self_attn.q_proj(norm_dit_hidden_states)
+        dit_key_states = self.dit.layers[dit_layer_index].self_attn.k_proj(norm_dit_hidden_states)
+        dit_value_states = self.dit.layers[dit_layer_index].self_attn.v_proj(norm_dit_hidden_states)
 
         dit_query_states = rearrange(dit_query_states, "b n (h d) -> b h n d", h=self.config.base_config.num_attention_heads)
         dit_key_states = rearrange(dit_key_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
@@ -965,16 +968,16 @@ class FuseDiT(PreTrainedModel):
             query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
             key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            if self.config.base_config.model_type == "qwen3_vl":
+            if self.config.base_config.model_type == "qwen3_vl_text":
                 input_shape=norm_llm_hidden_states.shape[:-1]
                 hidden_shape=(*input_shape, -1, self.config.base_config.head_dim)
-                llm_query_states= self.llm.layers[index].self_attn.q_norm(self.llm.layers[index].self_attn.q_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
-                llm_key_states= self.llm.layers[index].self_attn.k_norm(self.llm.layers[index].self_attn.k_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
-                llm_value_states= self.llm.layers[index].self_attn.v_proj(norm_llm_hidden_states).view(hidden_shape).transpose(1, 2)
+                llm_query_states= self.llm.layers[llm_layer_index].self_attn.q_norm(self.llm.layers[llm_layer_index].self_attn.q_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
+                llm_key_states= self.llm.layers[llm_layer_index].self_attn.k_norm(self.llm.layers[llm_layer_index].self_attn.k_proj(norm_llm_hidden_states).view(hidden_shape)).transpose(1, 2)
+                llm_value_states= self.llm.layers[llm_layer_index].self_attn.v_proj(norm_llm_hidden_states).view(hidden_shape).transpose(1, 2)
             else:
-                llm_query_states = self.llm.layers[index].self_attn.q_proj(norm_llm_hidden_states)
-                llm_key_states = self.llm.layers[index].self_attn.k_proj(norm_llm_hidden_states)
-                llm_value_states = self.llm.layers[index].self_attn.v_proj(norm_llm_hidden_states)
+                llm_query_states = self.llm.layers[llm_layer_index].self_attn.q_proj(norm_llm_hidden_states)
+                llm_key_states = self.llm.layers[llm_layer_index].self_attn.k_proj(norm_llm_hidden_states)
+                llm_value_states = self.llm.layers[llm_layer_index].self_attn.v_proj(norm_llm_hidden_states)
             
                 llm_query_states = rearrange(llm_query_states, "b n (h d) -> b h n d", h=self.config.base_config.num_attention_heads)
                 llm_key_states = rearrange(llm_key_states, "b n (h d) -> b h n d", h=self.config.base_config.num_key_value_heads)
@@ -983,8 +986,8 @@ class FuseDiT(PreTrainedModel):
         if self.config.qk_norm:
             # Force float32 for qk_norm
             dtype = dit_query_states.dtype
-            dit_query_states = self.dit.layers[index - self.config.initial_layers].self_attn.q_norm(dit_query_states.to(dtype=torch.float32)).to(dtype)
-            dit_key_states = self.dit.layers[index - self.config.initial_layers].self_attn.k_norm(dit_key_states.to(dtype=torch.float32)).to(dtype)
+            dit_query_states = self.dit.layers[dit_layer_index].self_attn.q_norm(dit_query_states.to(dtype=torch.float32)).to(dtype)
+            dit_key_states = self.dit.layers[dit_layer_index].self_attn.k_norm(dit_key_states.to(dtype=torch.float32)).to(dtype)
 
         if self.config.attention == "self":
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
@@ -1008,8 +1011,8 @@ class FuseDiT(PreTrainedModel):
                     dit_query_states, dit_key_states = apply_rotary_pos_emb(dit_query_states, dit_key_states, cos, sin)
 
                 query_states = dit_query_states
-                key_states = torch.cat([past_key_values.key_cache[index - self.config.initial_layers], dit_key_states], dim=2)
-                value_states = torch.cat([past_key_values.value_cache[index - self.config.initial_layers], dit_value_states], dim=2)
+                key_states = torch.cat([past_key_values.key_cache[dit_layer_index], dit_key_states], dim=2)
+                value_states = torch.cat([past_key_values.value_cache[dit_layer_index], dit_value_states], dim=2)
 
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -1019,25 +1022,25 @@ class FuseDiT(PreTrainedModel):
             attn_output = rearrange(attn_output, "b h n d -> b n (h d)")
 
             dit_attn_output = attn_output[:, -dit_hidden_states.shape[1]:]
-            dit_attn_output = self.dit.layers[index - self.config.initial_layers].self_attn.o_proj(dit_attn_output)
+            dit_attn_output = self.dit.layers[dit_layer_index].self_attn.o_proj(dit_attn_output)
             if self.config.sandwich_norm:
                 # Force float32 for post_attention_layernorm
                 dtype = dit_attn_output.dtype
-                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
+                dit_attn_output = self.dit.layers[dit_layer_index].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
             dit_hidden_states = dit_hidden_states + dit_gate_msa.unsqueeze(1) * dit_attn_output
 
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
                 llm_attn_output = attn_output[:, :-dit_hidden_states.shape[1]]
-                llm_attn_output = self.llm.layers[index].self_attn.o_proj(llm_attn_output)
+                llm_attn_output = self.llm.layers[llm_layer_index].self_attn.o_proj(llm_attn_output)
                 if self.config.base_config.model_type == "gemma2":
                     # Force float32 for llm post_attention_layernorm
                     dtype = llm_attn_output.dtype
-                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
+                    llm_attn_output = self.llm.layers[llm_layer_index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
                 llm_hidden_states = llm_hidden_states + llm_attn_output
         elif self.config.attention == "cross":
             if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
                 if past_key_values is not None:
-                    past_key_values.update(llm_key_states, llm_value_states, index - self.config.initial_layers)
+                    past_key_values.update(llm_key_states, llm_value_states, dit_layer_index)
 
                 if self.config.pos_embed == "ape": # RoPE only for LLM, APE for DiT
                     cos, sin = pos_embed
@@ -1064,15 +1067,15 @@ class FuseDiT(PreTrainedModel):
 
                 llm_attn_output = rearrange(llm_attn_output, "b h n d -> b n (h d)")
 
-                llm_attn_output = self.llm.layers[index].self_attn.o_proj(llm_attn_output)
+                llm_attn_output = self.llm.layers[llm_layer_index].self_attn.o_proj(llm_attn_output)
 
                 if self.config.base_config.model_type == "gemma2":
                     # Force float32 for llm post_attention_layernorm
                     dtype = llm_attn_output.dtype
-                    llm_attn_output = self.llm.layers[index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
+                    llm_attn_output = self.llm.layers[llm_layer_index].post_attention_layernorm(llm_attn_output.to(dtype=torch.float32)).to(dtype)
             else:
-                llm_key_states = past_key_values.key_cache[index - self.config.initial_layers]
-                llm_value_states = past_key_values.value_cache[index - self.config.initial_layers]
+                llm_key_states = past_key_values.key_cache[dit_layer_index]
+                llm_value_states = past_key_values.value_cache[dit_layer_index]
 
             if not self.config.pos_embed == "ape": # RoPE for both LLM and DiT
                 cos, sin = pos_embed
@@ -1091,12 +1094,12 @@ class FuseDiT(PreTrainedModel):
 
             dit_attn_output = rearrange(dit_attn_output, "b h n d -> b n (h d)")
 
-            dit_attn_output = self.dit.layers[index - self.config.initial_layers].self_attn.o_proj(dit_attn_output)
+            dit_attn_output = self.dit.layers[dit_layer_index].self_attn.o_proj(dit_attn_output)
 
             if self.config.sandwich_norm:
                 # Force float32 for post_attention_layernorm
                 dtype = dit_attn_output.dtype
-                dit_attn_output = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
+                dit_attn_output = self.dit.layers[dit_layer_index].post_attention_layernorm(dit_attn_output.to(dtype=torch.float32)).to(dtype)
 
         ########## Self Attention Ends ##########
 
@@ -1104,7 +1107,7 @@ class FuseDiT(PreTrainedModel):
 
             dit_hidden_states = dit_hidden_states + dit_gate_msa.unsqueeze(1) * dit_attn_output
 
-            dit_cross_attn_output = self.dit.layers[index - self.config.initial_layers].cross_attn(
+            dit_cross_attn_output = self.dit.layers[dit_layer_index].cross_attn(
                 dit_hidden_states,
                 key_states=llm_key_states.to(dit_hidden_states.dtype),
                 value_states=llm_value_states.to(dit_hidden_states.dtype),
@@ -1114,7 +1117,7 @@ class FuseDiT(PreTrainedModel):
             if self.config.sandwich_norm:
                 # Force float32 for post_cross_attention_layernorm
                 dtype = dit_cross_attn_output.dtype
-                dit_cross_attn_output = self.dit.layers[index - self.config.initial_layers].post_cross_attention_layernorm(dit_cross_attn_output.to(dtype=torch.float32)).to(dtype)
+                dit_cross_attn_output = self.dit.layers[dit_layer_index].post_cross_attention_layernorm(dit_cross_attn_output.to(dtype=torch.float32)).to(dtype)
 
             dit_hidden_states = dit_hidden_states + dit_cross_attn_output
 
@@ -1131,37 +1134,37 @@ class FuseDiT(PreTrainedModel):
         if self.config.sandwich_norm:
             # Force float32 for pre_feedforward_layernorm
             dtype = dit_hidden_states.dtype
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].pre_feedforward_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
+            norm_dit_hidden_states = self.dit.layers[dit_layer_index].pre_feedforward_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
         else:
             # Force float32 for post_attention_layernorm
             dtype = dit_hidden_states.dtype
-            norm_dit_hidden_states = self.dit.layers[index - self.config.initial_layers].post_attention_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
+            norm_dit_hidden_states = self.dit.layers[dit_layer_index].post_attention_layernorm(dit_hidden_states.to(dtype=torch.float32)).to(dtype)
         norm_dit_hidden_states = norm_dit_hidden_states * (1 + dit_scale_mlp[:, None]) + dit_shift_mlp[:, None]
-        dit_mlp_output = self.dit.layers[index - self.config.initial_layers].mlp(norm_dit_hidden_states)
+        dit_mlp_output = self.dit.layers[dit_layer_index].mlp(norm_dit_hidden_states)
         if self.config.sandwich_norm:
             # Force float32 for post_feedforward_layernorm
             dtype = dit_mlp_output.dtype
-            dit_mlp_output = self.dit.layers[index - self.config.initial_layers].post_feedforward_layernorm(dit_mlp_output.to(dtype=torch.float32)).to(dtype)
+            dit_mlp_output = self.dit.layers[dit_layer_index].post_feedforward_layernorm(dit_mlp_output.to(dtype=torch.float32)).to(dtype)
         dit_hidden_states = dit_hidden_states + dit_gate_mlp.unsqueeze(1) * dit_mlp_output
 
         if past_key_values is None or len(past_key_values.key_cache) < self.config.base_config.num_hidden_layers:
             if self.config.base_config.model_type == "gemma2":
                 # Force float32 for llm pre_feedforward_layernorm
                 dtype = llm_hidden_states.dtype
-                norm_llm_hidden_states = self.llm.layers[index].pre_feedforward_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+                norm_llm_hidden_states = self.llm.layers[llm_layer_index].pre_feedforward_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
             elif self.config.base_config.model_type == "gemma":
                 # Force float32 for llm post_attention_layernorm
                 dtype = llm_hidden_states.dtype
-                norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
-            elif self.config.base_config.model_type == "qwen3_vl":
+                norm_llm_hidden_states = self.llm.layers[llm_layer_index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+            elif self.config.base_config.model_type == "qwen3_vl_text":
                 dtype = llm_hidden_states.dtype
-                norm_llm_hidden_states = self.llm.layers[index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
+                norm_llm_hidden_states = self.llm.layers[llm_layer_index].post_attention_layernorm(llm_hidden_states.to(dtype=torch.float32)).to(dtype)
                 
-            llm_mlp_output = self.llm.layers[index].mlp(norm_llm_hidden_states)
+            llm_mlp_output = self.llm.layers[llm_layer_index].mlp(norm_llm_hidden_states)
             if self.config.base_config.model_type == "gemma2":
                 # Force float32 for llm post_feedforward_layernorm
                 dtype = llm_mlp_output.dtype
-                llm_mlp_output = self.llm.layers[index].post_feedforward_layernorm(llm_mlp_output.to(dtype=torch.float32)).to(dtype)
+                llm_mlp_output = self.llm.layers[llm_layer_index].post_feedforward_layernorm(llm_mlp_output.to(dtype=torch.float32)).to(dtype)
             llm_hidden_states = llm_hidden_states + llm_mlp_output
 
         return dit_hidden_states, llm_hidden_states
@@ -1320,7 +1323,7 @@ class FuseDiT(PreTrainedModel):
             )
         else:
             cross_attention_mask = None
-
+        '''
         for layer_index in range(self.config.initial_layers):
             if self.gradient_checkpointing and self.training:
                 llm_hidden_states = self._gradient_checkpointing_func(
@@ -1336,10 +1339,59 @@ class FuseDiT(PreTrainedModel):
                     self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
                     repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
                 )[0]
+        '''
+        # only supprt qwen3-vl-4b(36 layers) with a 18-layer dit
+        
+        for llm_layer_index in range(self.config.text_hidden_states_num):
+            if self.gradient_checkpointing and self.training:
+                if llm_layer_index%2==1:
+                    dit_layer_index=llm_layer_index//2 
+                    dit_hidden_states, llm_hidden_states = (
+                        self._gradient_checkpointing_func(
+                            self.shared_transformer_layer,
+                            dit_layer_index,
+                            llm_layer_index,
+                            dit_hidden_states,
+                            llm_hidden_states,
+                            temb,
+                            pos_embed,
+                            self_attention_mask,
+                            cross_attention_mask,
+                            past_key_values,
+                        )
+                    )
+                else:
+                    llm_hidden_states = self._gradient_checkpointing_func(
+                        self.llm.layers[llm_layer_index + self.config.initial_layers].__call__,
+                        llm_hidden_states,
+                        self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                        repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
+                    )[0]
+            else:
+                if llm_layer_index%2==1:
+                    dit_layer_index=llm_layer_index//2 
+                    dit_hidden_states, llm_hidden_states = self.shared_transformer_layer(
+                        dit_layer_index,
+                        llm_layer_index,
+                        dit_hidden_states,
+                        llm_hidden_states,
+                        temb,
+                        pos_embed,
+                        self_attention_mask,
+                        cross_attention_mask,
+                        past_key_values,
+                    )
+                else:
+                    llm_hidden_states = self.llm.layers[llm_layer_index + self.config.initial_layers](
+                        llm_hidden_states,
+                        self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                        repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
+                    )[0]
 
+        '''
         for layer_index in range(self.config.initial_layers, self.config.base_config.num_hidden_layers):
             if self.gradient_checkpointing and self.training:
-                if self.config.shared_attention_layers == "all" or layer_index in self.config.shared_attention_layers:
+                if self.config.shared_attention_layers == "all" or str(layer_index) in self.config.shared_attention_layers:
                     dit_hidden_states, llm_hidden_states = (
                         self._gradient_checkpointing_func(
                             self.shared_transformer_layer,
@@ -1368,7 +1420,7 @@ class FuseDiT(PreTrainedModel):
                     )[0]
 
             else:
-                if self.config.shared_attention_layers == "all" or layer_index in self.config.shared_attention_layers:
+                if self.config.shared_attention_layers == "all" or str(layer_index) in self.config.shared_attention_layers:
                     dit_hidden_states, llm_hidden_states = self.shared_transformer_layer(
                         layer_index,
                         dit_hidden_states,
@@ -1390,7 +1442,8 @@ class FuseDiT(PreTrainedModel):
                         self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
                         repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
                     )[0]
-
+        '''
+        '''
         for layer_index in range(self.config.base_config.num_hidden_layers - self.config.initial_layers, self.config.dit_num_hidden_layers):
             if self.gradient_checkpointing and self.training:
                 dit_hidden_states = self._gradient_checkpointing_func(
@@ -1406,7 +1459,7 @@ class FuseDiT(PreTrainedModel):
                     temb,
                     None if pos_embed is None else (pos_embed[0][:, llm_hidden_states.shape[1]:], pos_embed[1][:, llm_hidden_states.shape[1]:]),
                 )
-
+        '''
         if self.config.timestep_conditioning == "adaln-zero":
             dit_hidden_states = self.dit.norm_out(dit_hidden_states, temb)
         else:
@@ -1461,10 +1514,10 @@ def build_fusedit(hparams):
 
     if not hasattr(base_config, "head_dim"):
         base_config.head_dim = base_config.hidden_size // base_config.num_attention_heads
-    base_config.num_hidden_layers = min(
-        base_config.num_hidden_layers,
-        max(hparams.model.shared_attention_layers) + 1 if hparams.model.shared_attention_layers != "all" else base_config.num_hidden_layers,
-    )
+    #base_config.num_hidden_layers = min(
+    #    base_config.num_hidden_layers,
+    #    max(hparams.model.shared_attention_layers) + 1 if hparams.model.shared_attention_layers != "all" else base_config.num_hidden_layers,
+    #)
 
     config = FuseDiTConfig(
         attention=hparams.model.attention,
