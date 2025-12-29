@@ -34,7 +34,7 @@ model:
   sandwich_norm: false
   timestep_conditioning: "adaln-zero"
   shared_attention_layers: "even"
-
+  text_hidden_states_num: 36
 
 ema:
   decay: 0.99
