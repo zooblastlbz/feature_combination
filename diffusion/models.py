@@ -2,7 +2,7 @@ import functools
 import math
 from typing import Optional
 
-from altair import layer
+
 
 
 
@@ -36,8 +36,8 @@ from transformers.models.gemma.modeling_gemma import (
 from torch.nn import RMSNorm
 
 
-from .configs import DiTConfig, FuseDiTConfig
-from .modules import AdaLayerNormOut, DiTLayer
+from .configs import DiTConfig, FuseDiTConfig, MMDiTConfig
+from .modules import AdaLayerNormOut, DiTLayer, MMDiTLayer
 
 if is_torch_xla_available():
     ACCEL = "xla"
@@ -456,6 +456,246 @@ class DiT(PreTrainedModel):
 
         gradient_checkpointing_func = functools.partial(torch.utils.checkpoint.checkpoint, **gradient_checkpointing_kwargs)
         
+        self._set_gradient_checkpointing(enable=True, gradient_checkpointing_func=gradient_checkpointing_func)
+
+    def trainable_parameters(self):
+        return filter(lambda p: p.requires_grad, self.parameters())
+
+
+class MMDiT(PreTrainedModel):
+    """
+    Multi-Modal DiT Model. Combines text and image tokens and runs joint self-attention.
+    """
+
+    config_class = MMDiTConfig
+    supports_gradient_checkpointing = True
+    _supports_sdpa = True
+
+    def __init__(self, config: MMDiTConfig):
+        super().__init__(config)
+
+        self.layers = nn.ModuleList([MMDiTLayer(config) for _ in range(config.dit_num_hidden_layers)])
+
+        self.patch_embed = PatchEmbed(
+            height=config.sample_size,
+            width=config.sample_size,
+            patch_size=config.patch_size,
+            in_channels=config.in_channels,
+            embed_dim=config.dit_hidden_size,
+            pos_embed_type=None if config.pos_embed != "ape" else "sincos",
+            pos_embed_max_size=config.pos_embed_max_size,
+        )
+
+        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
+
+        if config.timestep_conditioning is not None:
+            self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
+            self.timestep_embedder = nn.Sequential(
+                nn.Linear(256, config.dit_hidden_size),
+                nn.SiLU(),
+                nn.Linear(config.dit_hidden_size, config.dit_hidden_size),
+            )
+        if config.timestep_conditioning == "adaln-single":
+            self.t_block = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(config.dit_hidden_size, 6 * config.dit_hidden_size),
+            )
+            self.scale_shift_table = nn.Parameter(torch.randn(2 * config.dit_hidden_size) / config.dit_hidden_size ** 0.5)
+
+        if config.text_modulation_embeds_dim is not None:
+            self.condition_embedder = nn.Sequential(
+                RMSNorm(config.text_modulation_embeds_dim, eps=config.base_config.rms_norm_eps),
+                nn.Linear(config.text_modulation_embeds_dim, config.dit_hidden_size),
+                nn.SiLU(),
+                nn.Linear(config.dit_hidden_size, config.dit_hidden_size),
+            )
+
+        self.context_embedder = nn.Sequential(
+            RMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
+            nn.Linear(config.text_hidden_size, config.dit_hidden_size),
+        )
+
+        if config.timestep_conditioning == "adaln-zero":
+            self.norm_out = AdaLayerNormOut(config)
+        else:
+            self.norm_out = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
+        self.proj_out = nn.Linear(
+            config.dit_hidden_size,
+            config.patch_size * config.patch_size * config.out_channels,
+            bias=True,
+        )
+
+        self.gradient_checkpointing = False
+
+        self.initialize_weights()
+
+    def _build_attention_mask(self, attention_mask: Optional[torch.LongTensor], total_length: int, dtype, device):
+        if attention_mask is None:
+            return None
+
+        min_dtype = torch.finfo(dtype).min
+        bsz, text_length = attention_mask.shape
+        attn_mask = torch.zeros(bsz, 1, total_length, total_length, device=device, dtype=dtype)
+
+        padding_mask = attention_mask == 0
+        if padding_mask.any():
+            # Mask keys for padded text tokens
+            attn_mask[:, :, :, :text_length] = attn_mask[:, :, :, :text_length].masked_fill(
+                padding_mask.unsqueeze(1).unsqueeze(2), min_dtype
+            )
+            # Mask queries from padded text tokens
+            attn_mask[:, :, :text_length, :] = attn_mask[:, :, :text_length, :].masked_fill(
+                padding_mask.unsqueeze(1).unsqueeze(3), min_dtype
+            )
+
+        return attn_mask
+
+    def forward(
+        self,
+        hidden_states: torch.FloatTensor,
+        timestep: torch.LongTensor,
+        text_hidden_states: torch.FloatTensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        text_modulation_embeds: Optional[torch.FloatTensor] = None,
+    ):
+        if text_hidden_states is None:
+            raise ValueError("text_hidden_states is required for MMDiT forward.")
+        height, width = hidden_states.shape[-2:]
+        patch_size = self.config.patch_size
+        height = height // patch_size
+        width = width // patch_size
+
+        hidden_states = self.patch_embed(hidden_states)
+
+        if self.config.timestep_conditioning is not None:
+            timestep_embed = self.time_proj(timestep).to(hidden_states.dtype)
+            timestep_embed = self.timestep_embedder(timestep_embed)
+
+            if self.config.text_modulation_embeds_dim is not None and text_modulation_embeds is not None:
+                dtype = text_modulation_embeds.dtype
+                cond_embeds = self.condition_embedder(text_modulation_embeds.to(dtype=torch.float32)).to(dtype)
+                timestep_embed = timestep_embed + cond_embeds
+
+            if self.config.timestep_conditioning == "adaln-single":
+                temb = self.t_block(timestep_embed)
+            else:
+                temb = timestep_embed
+        else:
+            temb = torch.zeros_like(hidden_states[:, 0, :])
+            timestep_embed = temb
+
+        dtype = text_hidden_states.dtype
+        text_hidden_states = F.layer_norm(text_hidden_states, [text_hidden_states.shape[-1]])
+        text_hidden_states = self.context_embedder(text_hidden_states).to(dtype)
+
+        if attention_mask is not None:
+            text_hidden_states = text_hidden_states * attention_mask.unsqueeze(-1).to(dtype)
+            # Trim padded tokens: keep up to max valid length across batch
+            text_length = attention_mask.sum(dim=1).max().item()
+            text_length = int(text_length)
+            if text_length < text_hidden_states.shape[1]:
+                text_hidden_states = text_hidden_states[:, :text_length]
+                attention_mask = attention_mask[:, :text_length]
+        else:
+            text_length = text_hidden_states.shape[1]
+        image_hidden_states = hidden_states
+        if self.config.timestep_conditioning == "addition":
+            image_hidden_states = image_hidden_states + temb.unsqueeze(1)
+
+        if self.config.pos_embed in ["2d-rope", "m-rope"]:
+            raise NotImplementedError("MMDiT currently supports 1d-rope or APE only.")
+
+        combined_states = torch.cat([text_hidden_states, image_hidden_states], dim=1)
+        if self.config.pos_embed == "ape":
+            pos_embed = None
+        else:
+            # Text/image 1d-RoPE with separate offsets so image positions不受padding偏移
+            text_pos_ids = torch.arange(text_hidden_states.shape[1], device=combined_states.device).unsqueeze(0)
+            img_pos_ids = torch.arange(image_hidden_states.shape[1], device=combined_states.device).unsqueeze(0)
+            text_cos, text_sin = self.rotary_emb(text_hidden_states, text_pos_ids)
+            img_cos, img_sin = self.rotary_emb(image_hidden_states, img_pos_ids)
+            pos_embed = (torch.cat([text_cos, img_cos], dim=1), torch.cat([text_sin, img_sin], dim=1))
+
+        attention_mask = self._build_attention_mask(
+            attention_mask,
+            combined_states.shape[1],
+            torch.float32 if ACCEL == "xla" else combined_states.dtype,
+            combined_states.device,
+        )
+
+        for layer_index in range(self.config.dit_num_hidden_layers):
+            if self.gradient_checkpointing and self.training:
+                text_hidden_states, image_hidden_states = self._gradient_checkpointing_func(
+                    self.layers[layer_index].__call__,
+                    text_hidden_states,
+                    image_hidden_states,
+                    temb,
+                    pos_embed,
+                    attention_mask,
+                    text_length,
+                )
+            else:
+                text_hidden_states, image_hidden_states = self.layers[layer_index](
+                    text_hidden_states,
+                    image_hidden_states,
+                    temb,
+                    pos_embed,
+                    attention_mask,
+                    text_length,
+                )
+
+        if self.config.timestep_conditioning == "adaln-zero":
+            image_hidden_states = self.norm_out(image_hidden_states, temb)
+        else:
+            dtype = image_hidden_states.dtype
+            image_hidden_states = self.norm_out(image_hidden_states.to(dtype=torch.float32)).to(dtype)
+
+        if self.config.timestep_conditioning == "adaln-single":
+            shift, scale = (self.scale_shift_table + repeat(timestep_embed, "b d -> b (2 d)")).chunk(2, dim=1)
+            image_hidden_states = image_hidden_states * (1 + scale[:, None]) + shift[:, None]
+
+        image_hidden_states = self.proj_out(image_hidden_states)
+
+        output = unpatchify(image_hidden_states, height, width, patch_size)
+
+        return output
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+
+        if self.config.timestep_conditioning == "adaln-zero":
+            nn.init.constant_(self.norm_out.linear.weight, 0)
+            nn.init.constant_(self.norm_out.linear.bias, 0)
+        elif self.config.timestep_conditioning == "adaln-single":
+            nn.init.normal_(self.t_block[1].weight, std=self.config.base_config.initializer_range)
+
+        w = self.patch_embed.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.patch_embed.proj.bias, 0)
+
+        if self.config.timestep_conditioning is not None:
+            nn.init.normal_(self.timestep_embedder[0].weight, std=self.config.base_config.initializer_range)
+            nn.init.normal_(self.timestep_embedder[2].weight, std=self.config.base_config.initializer_range)
+
+        if self.config.text_modulation_embeds_dim is not None:
+            nn.init.normal_(self.condition_embedder[1].weight, std=self.config.base_config.initializer_range)
+            nn.init.normal_(self.condition_embedder[3].weight, std=self.config.base_config.initializer_range)
+
+        nn.init.normal_(self.context_embedder[1].weight, std=self.config.base_config.initializer_range)
+        nn.init.constant_(self.proj_out.weight, 0)
+        nn.init.constant_(self.proj_out.bias, 0)
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if gradient_checkpointing_kwargs is None:
+            gradient_checkpointing_kwargs = { "use_reentrant": True }
+
+        gradient_checkpointing_func = functools.partial(torch.utils.checkpoint.checkpoint, **gradient_checkpointing_kwargs)
+
         self._set_gradient_checkpointing(enable=True, gradient_checkpointing_func=gradient_checkpointing_func)
 
     def trainable_parameters(self):
@@ -1304,7 +1544,8 @@ class FuseDiT(PreTrainedModel):
             width,
             use_cache and past_key_values.get_seq_length() > 0,
         )
-
+        #print(f"llm_hidden_states shape: {llm_hidden_states.shape}, dit_hidden_states shape: {dit_hidden_states.shape}")
+        #print(f"pos_embed shape: {pos_embed[0].shape}, {pos_embed[1].shape}")
         self_attention_mask = update_self_attention_mask(
             attention_mask,
             dit_hidden_states.shape[1] if self.config.attention == "self" else 0,
@@ -1362,7 +1603,8 @@ class FuseDiT(PreTrainedModel):
                     )
                 else:
                     llm_hidden_states = self._gradient_checkpointing_func(
-                        self.llm.layers[llm_layer_index + self.config.initial_layers].__call__,
+                        self.llm.layers[llm_layer_index ].__call__,
+                        pos_embed,
                         llm_hidden_states,
                         self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
                         repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
@@ -1382,11 +1624,17 @@ class FuseDiT(PreTrainedModel):
                         past_key_values,
                     )
                 else:
-                    llm_hidden_states = self.llm.layers[llm_layer_index + self.config.initial_layers](
+                    llm_len = llm_hidden_states.shape[1]
+                    llm_pos = (pos_embed[0][:, :llm_len], pos_embed[1][:, :llm_len])
+
+                    llm_hidden_states = self.llm.layers[llm_layer_index](
                         llm_hidden_states,
-                        self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
-                        repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
+                        llm_pos,  # 只给 LLM 部分
+                        self_attention_mask[:, :, :llm_len, :llm_len],
+                        repeat(torch.arange(llm_len, device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0]),
                     )[0]
+
+
 
         '''
         for layer_index in range(self.config.initial_layers, self.config.base_config.num_hidden_layers):
@@ -1579,6 +1827,34 @@ def build_dit(hparams):
     return transformer
 
 
+def build_mmdit(hparams):
+    """构建 MMDiT 模型，默认使用 1d-rope 与 AdaLN-Zero 时间条件。"""
+    base_config = AutoConfig.from_pretrained(hparams.model.base)
+    load_model = get_llm(hparams.model.base, base_config)
+    base_config = load_model.config
+    base_config = _patch_base_config_defaults(base_config)
+    del load_model
+
+    config = MMDiTConfig(
+        attention="self",
+        base_config=base_config,
+        dit_hidden_size=hparams.model.dit_hidden_size if hasattr(hparams.model, "dit_hidden_size") else base_config.hidden_size,
+        dit_num_hidden_layers=hparams.model.dit_num_hidden_layers,
+        patch_size=hparams.model.patch_size,
+        pos_embed=getattr(hparams.model, "pos_embed", "1d-rope"),
+        qk_norm=hparams.model.qk_norm if hasattr(hparams.model, "qk_norm") else False,
+        text_hidden_size=base_config.hidden_size,
+        text_hidden_states_index=hparams.model.text_hidden_states_index if hasattr(hparams.model, "text_hidden_states_index") else -1,
+        text_modulation_embeds_dim=hparams.model.text_modulation_embeds_dim if hasattr(hparams.model, "text_modulation_embeds_dim") else None,
+        timestep_conditioning=getattr(hparams.model, "timestep_conditioning", "adaln-zero"),
+    )
+
+    transformer = MMDiT(config)
+    transformer.requires_grad_(hparams.trainer.train_dit)
+
+    return transformer
+
+
 def build_adafusedit(hparams):
     """构建 AdaFuseDiT 模型，支持多层文本特征自适应融合"""
     base_config = AutoConfig.from_pretrained(hparams.model.base)
@@ -1621,6 +1897,8 @@ def build_adafusedit(hparams):
 def build_model(hparams):
     if hparams.model.name == "DiT":
         return build_dit(hparams)
+    elif hparams.model.name == "MMDiT":
+        return build_mmdit(hparams)
     elif hparams.model.name == "AdaFuseDiT":
         return build_adafusedit(hparams)
     elif hparams.model.name == "FuseDiT":
