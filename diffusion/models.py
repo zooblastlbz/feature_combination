@@ -539,13 +539,9 @@ class MMDiT(PreTrainedModel):
 
         padding_mask = attention_mask == 0
         if padding_mask.any():
-            # Mask keys for padded text tokens
+            # Mask keys for padded text tokens (only columns)
             attn_mask[:, :, :, :text_length] = attn_mask[:, :, :, :text_length].masked_fill(
                 padding_mask.unsqueeze(1).unsqueeze(2), min_dtype
-            )
-            # Mask queries from padded text tokens
-            attn_mask[:, :, :text_length, :] = attn_mask[:, :, :text_length, :].masked_fill(
-                padding_mask.unsqueeze(1).unsqueeze(3), min_dtype
             )
 
         return attn_mask
@@ -590,14 +586,7 @@ class MMDiT(PreTrainedModel):
 
         if attention_mask is not None:
             text_hidden_states = text_hidden_states * attention_mask.unsqueeze(-1).to(dtype)
-            # Trim padded tokens: keep up to max valid length across batch
-            text_length = attention_mask.sum(dim=1).max().item()
-            text_length = int(text_length)
-            if text_length < text_hidden_states.shape[1]:
-                text_hidden_states = text_hidden_states[:, :text_length]
-                attention_mask = attention_mask[:, :text_length]
-        else:
-            text_length = text_hidden_states.shape[1]
+        text_length = text_hidden_states.shape[1]
         image_hidden_states = hidden_states
         if self.config.timestep_conditioning == "addition":
             image_hidden_states = image_hidden_states + temb.unsqueeze(1)
