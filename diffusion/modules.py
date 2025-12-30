@@ -382,3 +382,182 @@ class DiTLayer(nn.Module):
         hidden_states = hidden_states + gate_mlp.unsqueeze(1) * mlp_output
 
         return hidden_states
+
+
+class MMDiTDoubleStreamAttention(nn.Module):
+    """
+    Double-stream attention: separate text/image projections, joint attention, split outputs.
+    """
+
+    def __init__(self, config: DiTConfig):
+        super().__init__()
+        self.config = config
+        self.num_heads = config.base_config.num_attention_heads
+        self.num_kv_heads = config.base_config.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // self.num_kv_heads
+        self.head_dim = config.base_config.head_dim
+
+        # Text projections
+        self.txt_q_proj = nn.Linear(config.dit_hidden_size, self.num_heads * self.head_dim, bias=config.base_config.attention_bias)
+        self.txt_k_proj = nn.Linear(config.dit_hidden_size, self.num_kv_heads * self.head_dim, bias=config.base_config.attention_bias)
+        self.txt_v_proj = nn.Linear(config.dit_hidden_size, self.num_kv_heads * self.head_dim, bias=config.base_config.attention_bias)
+
+        # Image projections
+        self.img_q_proj = nn.Linear(config.dit_hidden_size, self.num_heads * self.head_dim, bias=config.base_config.attention_bias)
+        self.img_k_proj = nn.Linear(config.dit_hidden_size, self.num_kv_heads * self.head_dim, bias=config.base_config.attention_bias)
+        self.img_v_proj = nn.Linear(config.dit_hidden_size, self.num_kv_heads * self.head_dim, bias=config.base_config.attention_bias)
+
+        if config.qk_norm:
+            self.txt_q_norm = RMSNorm(self.head_dim, eps=config.base_config.rms_norm_eps)
+            self.txt_k_norm = RMSNorm(self.head_dim, eps=config.base_config.rms_norm_eps)
+            self.img_q_norm = RMSNorm(self.head_dim, eps=config.base_config.rms_norm_eps)
+            self.img_k_norm = RMSNorm(self.head_dim, eps=config.base_config.rms_norm_eps)
+
+        self.txt_out_proj = nn.Linear(self.num_heads * self.head_dim, config.dit_hidden_size, bias=config.base_config.attention_bias)
+        self.img_out_proj = nn.Linear(self.num_heads * self.head_dim, config.dit_hidden_size, bias=config.base_config.attention_bias)
+
+    def _rope(self, q, k, cos, sin):
+        return apply_rotary_pos_emb(q, k, cos, sin)
+
+    def forward(
+        self,
+        image_states: torch.FloatTensor,
+        text_states: torch.FloatTensor,
+        pos_embed: Optional[torch.FloatTensor],
+        text_length: int,
+        attention_mask: Optional[torch.FloatTensor] = None,
+    ):
+        # Projections
+        txt_q = self.txt_q_proj(text_states)
+        txt_k = self.txt_k_proj(text_states)
+        txt_v = self.txt_v_proj(text_states)
+
+        img_q = self.img_q_proj(image_states)
+        img_k = self.img_k_proj(image_states)
+        img_v = self.img_v_proj(image_states)
+
+        txt_q = rearrange(txt_q, "b n (h d) -> b h n d", h=self.num_heads)
+        txt_k = rearrange(txt_k, "b n (h d) -> b h n d", h=self.num_kv_heads)
+        txt_v = rearrange(txt_v, "b n (h d) -> b h n d", h=self.num_kv_heads)
+
+        img_q = rearrange(img_q, "b n (h d) -> b h n d", h=self.num_heads)
+        img_k = rearrange(img_k, "b n (h d) -> b h n d", h=self.num_kv_heads)
+        img_v = rearrange(img_v, "b n (h d) -> b h n d", h=self.num_kv_heads)
+
+        if self.config.qk_norm:
+            dtype = txt_q.dtype
+            txt_q = self.txt_q_norm(txt_q.to(dtype=torch.float32)).to(dtype=dtype)
+            txt_k = self.txt_k_norm(txt_k.to(dtype=torch.float32)).to(dtype=dtype)
+            img_q = self.img_q_norm(img_q.to(dtype=torch.float32)).to(dtype=dtype)
+            img_k = self.img_k_norm(img_k.to(dtype=torch.float32)).to(dtype=dtype)
+
+        if pos_embed is not None:
+            cos, sin = pos_embed
+            cos_txt, sin_txt = cos[:, :text_length], sin[:, :text_length]
+            cos_img, sin_img = cos[:, text_length:], sin[:, text_length:]
+            txt_q, txt_k = self._rope(txt_q, txt_k, cos_txt, sin_txt)
+            img_q, img_k = self._rope(img_q, img_k, cos_img, sin_img)
+
+        txt_k = repeat_kv(txt_k, self.num_key_value_groups)
+        txt_v = repeat_kv(txt_v, self.num_key_value_groups)
+        img_k = repeat_kv(img_k, self.num_key_value_groups)
+        img_v = repeat_kv(img_v, self.num_key_value_groups)
+
+        joint_q = torch.cat([txt_q, img_q], dim=2)
+        joint_k = torch.cat([txt_k, img_k], dim=2)
+        joint_v = torch.cat([txt_v, img_v], dim=2)
+
+        attn_output = F.scaled_dot_product_attention(
+            joint_q, joint_k, joint_v, attn_mask=attention_mask, is_causal=False
+        )
+        attn_output = rearrange(attn_output, "b h n d -> b n (h d)")
+
+        txt_attn_out = attn_output[:, :text_length]
+        img_attn_out = attn_output[:, text_length:]
+
+        txt_attn_out = self.txt_out_proj(txt_attn_out)
+        img_attn_out = self.img_out_proj(img_attn_out)
+
+        return img_attn_out, txt_attn_out
+
+
+class MMDiTFeedForward(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        inner = 4 * dim
+        self.fc1 = nn.Linear(dim, inner)
+        self.fc2 = nn.Linear(inner, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(F.gelu(self.fc1(x), approximate="tanh"))
+
+
+class MMDiTLayer(nn.Module):
+    """
+    Multi-Modal DiT block aligned to Qwen-Image: double-stream attention with per-stream modulations.
+    """
+
+    def __init__(self, config: DiTConfig):
+        super().__init__()
+        self.config = config
+        dim = config.dit_hidden_size
+
+        # Modulations (shift/scale/gate) for attention and MLP per stream
+        self.img_mod = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+        self.txt_mod = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+
+        # LayerNorm without affine, per stream
+        eps = config.base_config.rms_norm_eps
+        self.img_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.txt_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+
+        self.self_attn = MMDiTDoubleStreamAttention(config)
+        self.img_mlp = MMDiTFeedForward(dim)
+        self.txt_mlp = MMDiTFeedForward(dim)
+
+    def _modulate(self, x: torch.Tensor, params: torch.Tensor):
+        shift, scale, gate = params.chunk(3, dim=-1)
+        x = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        return x, gate
+
+    def forward(
+        self,
+        text_states: torch.FloatTensor,
+        image_states: torch.FloatTensor,
+        temb: torch.FloatTensor,
+        pos_embed: Optional[torch.FloatTensor],
+        attention_mask: Optional[torch.FloatTensor],
+        text_length: int,
+    ):
+        img_mod_attn, img_mod_mlp = self.img_mod(temb).chunk(2, dim=-1)
+        txt_mod_attn, txt_mod_mlp = self.txt_mod(temb).chunk(2, dim=-1)
+
+        img_normed = self.img_norm1(image_states)
+        txt_normed = self.txt_norm1(text_states)
+
+        img_modulated, img_gate = self._modulate(img_normed, img_mod_attn)
+        txt_modulated, txt_gate = self._modulate(txt_normed, txt_mod_attn)
+
+        img_attn_out, txt_attn_out = self.self_attn(
+            image_states=img_modulated,
+            text_states=txt_modulated,
+            pos_embed=pos_embed,
+            text_length=text_length,
+            attention_mask=attention_mask,
+        )
+
+        image_states = image_states + img_gate.unsqueeze(1) * img_attn_out
+        text_states = text_states + txt_gate.unsqueeze(1) * txt_attn_out
+
+        img_normed = self.img_norm2(image_states)
+        txt_normed = self.txt_norm2(text_states)
+
+        img_modulated, img_gate = self._modulate(img_normed, img_mod_mlp)
+        txt_modulated, txt_gate = self._modulate(txt_normed, txt_mod_mlp)
+
+        image_states = image_states + img_gate.unsqueeze(1) * self.img_mlp(img_modulated)
+        text_states = text_states + txt_gate.unsqueeze(1) * self.txt_mlp(txt_modulated)
+
+        return text_states, image_states

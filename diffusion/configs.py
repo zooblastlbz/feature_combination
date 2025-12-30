@@ -88,3 +88,16 @@ class FuseDiTConfig(DiTConfig):
         **kwargs
     ):
         super().__init__(**kwargs)
+
+
+class MMDiTConfig(DiTConfig):
+    """
+    Multi-Modal DiT config.
+    Keeps the same defaults as DiT but uses a different model_type identifier
+    so we can dispatch to the MMDiT architecture.
+    """
+
+    model_type = "MMDiT"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)

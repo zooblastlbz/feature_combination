@@ -178,6 +178,10 @@ class Trainer(ABC):
 
         return loss
 
+    def mmdit_training_step(self, batch):
+        """MMDiT 训练步骤（与 DiT 相同的数据流，模型内部为多模态自注意力）"""
+        return self.dit_training_step(batch)
+
     def fusedit_training_step(self, batch):
         """FuseDiT 模型训练步骤"""
         pixel_values = batch["pixel_values"]
@@ -525,6 +529,18 @@ class AccelerateTrainer(Trainer):
             else:
                 raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
             self.training_step = self.dit_training_step
+
+        elif hparams.model.name == "MMDiT":
+            if hparams.model.encoder_type == "llm":
+                if self.accelerator.is_main_process:
+                    print(f"📦 加载 LLM 到 {device}...")
+                self.llm = get_llm(hparams.model.base, self.accelerator.unwrap_model(self.model).config.base_config)
+                self.llm.requires_grad_(False)
+                self.llm.eval()
+                self.llm.to(device, dtype=self.weight_dtype)
+            else:
+                raise ValueError(f"Unknown encoder type: {hparams.model.encoder_type}")
+            self.training_step = self.mmdit_training_step
             
         elif hparams.model.name == "AdaFuseDiT":
             if hparams.model.encoder_type == "llm":
