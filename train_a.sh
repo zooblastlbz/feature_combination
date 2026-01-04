@@ -19,6 +19,7 @@ export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
 
 #export WANDB_RUN_ID="s40a2v90" #layeronly
 export TORCH_DISTRIBUTED_TIMEOUT=1800
+export WANDB_RUN_ID="67i0hsdu" #mmdit
 cp /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_a800 /root/.deepspeed_env
 set -a 
 source /ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/env_a800
@@ -28,7 +29,6 @@ HOSTFILE=/etc/mpi/hostfile
 MASTER_ADDR=$(head -n 1 ${HOSTFILE} | awk '{print $1}')
 MASTER_PORT=30001
 export WANDB_API_KEY="c091a3f754adb7c44dbca6252e7f35ee202b87ef"
-#export WANDB_RUN_ID="gfzca3m7" #timewise
 
 echo "🚀 Master Address: ${MASTER_ADDR}:${MASTER_PORT}"
 
@@ -38,6 +38,7 @@ ACCELERATE_CONFIG=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combinatio
 CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/baseline.yaml
 CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/layer-only.yaml
 CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/fusedit-baseline.yaml
+CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/mmdit/qwen3-vl-4b.yaml
 #CONFIG_FILE=/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/configs/adafusedit/qwen3-vl-4b.yaml
 # Python 环境
 PYTHON_BIN=/ytech_m2v5_hdd/workspace/kling_mm/libozhou/miniconda3/envs/fc-new/bin

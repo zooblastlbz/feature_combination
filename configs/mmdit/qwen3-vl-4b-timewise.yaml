@@ -1,6 +1,6 @@
 trainer:
   cache_dir: "../.cache/torch_xla"
-  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-mmdit"
+  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-mmdit-layerwise"
   checkpointing_steps: 5000
   consolidation_steps: 50000
   enable_gradient_checkpointing: false
@@ -16,7 +16,7 @@ trainer:
   precondition_outputs: false
   project: "AdaFuseDiT"
   resume_from: null
-  run: "mmdit"
+  run: "mmdit-timewise"
   seed: 42
   weighting_scheme: "logit_normal"
   train_dit: true
@@ -34,6 +34,13 @@ model:
   sandwich_norm: false
   text_hidden_states_index: -2   # use the penultimate LLM layer
   timestep_conditioning: "adaln-zero"
+
+    # === AdaFuseDiT 特有配置 ===
+  text_hidden_states_num: 36
+  use_timestep_adaptive_fusion: true
+  use_layer_wise_fusion: false
+  adaptive_fusion_time_embed_dim: 128
+
 
 ema:
   decay: 0.99

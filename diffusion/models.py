@@ -510,6 +510,19 @@ class MMDiT(PreTrainedModel):
                 nn.Linear(config.dit_hidden_size, config.dit_hidden_size),
             )
 
+        if config.text_hidden_states_num > 1:
+            if config.use_layer_wise_fusion:
+                raise ValueError("MMDiT does not support layer-wise text fusion.")
+            if config.use_timestep_adaptive_fusion:
+                self.text_fusion_module = TimestepWiseFeatureWeighting(
+                    num_layers=config.text_hidden_states_num,
+                    time_embed_dim=config.adaptive_fusion_time_embed_dim,
+                    feature_dim=config.text_hidden_size,
+                )
+            else:
+                # Zero init so softmax starts as uniform
+                self.text_fusion_weight = nn.Parameter(torch.zeros(config.text_hidden_states_num))
+
         self.context_embedder = nn.Sequential(
             RMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
             nn.Linear(config.text_hidden_size, config.dit_hidden_size),
@@ -528,6 +541,41 @@ class MMDiT(PreTrainedModel):
         self.gradient_checkpointing = False
 
         self.initialize_weights()
+
+    def _fuse_text_features(self, text_hidden_states, timestep: torch.Tensor):
+        """
+        Fuse text features across multiple hidden layers using either learnable
+        static weights or a timestep-aware MLP. Layer-wise fusion is intentionally
+        not supported for MMDiT.
+        """
+        if self.config.text_hidden_states_num == 1:
+            return text_hidden_states[0] if isinstance(text_hidden_states, (list, tuple)) else text_hidden_states
+
+        if not isinstance(text_hidden_states, (list, tuple)):
+            raise ValueError(
+                f"Expected list/tuple of text hidden states when text_hidden_states_num={self.config.text_hidden_states_num}, "
+                f"but got {type(text_hidden_states)}"
+            )
+
+        if len(text_hidden_states) != self.config.text_hidden_states_num:
+            raise ValueError(
+                f"Expected {self.config.text_hidden_states_num} text hidden states, got {len(text_hidden_states)}"
+            )
+
+        dtype = text_hidden_states[0].dtype
+
+        if self.config.use_timestep_adaptive_fusion:
+            normalized_timestep = timestep.float() / 1000.0
+            fused_text, _ = self.text_fusion_module(text_hidden_states, normalized_timestep)
+        else:
+            normalized_hidden_states = [
+                F.layer_norm(h.float(), normalized_shape=(self.config.text_hidden_size,)) for h in text_hidden_states
+            ]
+            weights = F.softmax(self.text_fusion_weight.float(), dim=0)
+            stacked = torch.stack(normalized_hidden_states, dim=0)
+            fused_text = torch.sum(stacked * weights.view(-1, 1, 1, 1), dim=0).to(dtype)
+
+        return fused_text
 
     def _build_attention_mask(self, attention_mask: Optional[torch.LongTensor], total_length: int, dtype, device):
         if attention_mask is None:
@@ -579,6 +627,8 @@ class MMDiT(PreTrainedModel):
         else:
             temb = torch.zeros_like(hidden_states[:, 0, :])
             timestep_embed = temb
+
+        text_hidden_states = self._fuse_text_features(text_hidden_states, timestep)
 
         dtype = text_hidden_states.dtype
         text_hidden_states = F.layer_norm(text_hidden_states, [text_hidden_states.shape[-1]])
@@ -1834,6 +1884,10 @@ def build_mmdit(hparams):
         qk_norm=hparams.model.qk_norm if hasattr(hparams.model, "qk_norm") else False,
         text_hidden_size=base_config.hidden_size,
         text_hidden_states_index=hparams.model.text_hidden_states_index if hasattr(hparams.model, "text_hidden_states_index") else -1,
+        text_hidden_states_num=getattr(hparams.model, "text_hidden_states_num", 1),
+        use_timestep_adaptive_fusion=getattr(hparams.model, "use_timestep_adaptive_fusion", False),
+        use_layer_wise_fusion=False,
+        adaptive_fusion_time_embed_dim=getattr(hparams.model, "adaptive_fusion_time_embed_dim", 128),
         text_modulation_embeds_dim=hparams.model.text_modulation_embeds_dim if hasattr(hparams.model, "text_modulation_embeds_dim") else None,
         timestep_conditioning=getattr(hparams.model, "timestep_conditioning", "adaln-zero"),
     )

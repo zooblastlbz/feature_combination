@@ -762,14 +762,25 @@ class DiTPipeline(DiffusionPipeline, FromSingleFileMixin):
 
         position_ids = torch.arange(input_ids.shape[1], device=self.device).unsqueeze(0)
 
-        text_hidden_states = self.llm(
+        llm_output = self.llm(
             input_ids.to(self.device),
             llm_attention_mask,
             position_ids,
             use_cache=False,
             output_hidden_states=True,
             return_dict=False,
-        )[1][self.transformer.config.text_hidden_states_index].to(dtype=self.transformer.dtype)
+        )
+        all_hidden_states = llm_output[1]
+        text_hidden_states_num = getattr(self.transformer.config, "text_hidden_states_num", 1)
+        if text_hidden_states_num > 1:
+            text_hidden_states = [
+                all_hidden_states[-text_hidden_states_num + i].to(dtype=self.transformer.dtype)
+                for i in range(text_hidden_states_num)
+            ]
+        else:
+            text_hidden_states = all_hidden_states[self.transformer.config.text_hidden_states_index].to(
+                dtype=self.transformer.dtype
+            )
         attention_mask = attention_mask
 
         #attention_mask_float = attention_mask.to(dtype=text_hidden_states.dtype).unsqueeze(-1)
