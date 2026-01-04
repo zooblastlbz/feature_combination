@@ -120,15 +120,25 @@ class Trainer(ABC):
             position_ids = torch.arange(input_ids.shape[1], device=self.accelerator.device).unsqueeze(0)
 
             with torch.no_grad():
-                text_hidden_states = self.llm(
+                llm_output = self.llm(
                     input_ids.to(self.accelerator.device),
                     llm_attention_mask,
                     position_ids,
                     use_cache=False,
                     output_hidden_states=True,
                     return_dict=False,
-                )[1][self.hparams.model.text_hidden_states_index]
-            text_hidden_states = text_hidden_states.to(dtype=self.weight_dtype)
+                )
+            all_hidden_states = llm_output[1]
+
+            text_hidden_states_num = getattr(self.hparams.model, "text_hidden_states_num", 1)
+            if text_hidden_states_num > 1:
+                text_hidden_states = [
+                    all_hidden_states[-text_hidden_states_num + i].to(dtype=self.weight_dtype)
+                    for i in range(text_hidden_states_num)
+                ]
+            else:
+                text_hidden_states_index = getattr(self.hparams.model, "text_hidden_states_index", -1)
+                text_hidden_states = all_hidden_states[text_hidden_states_index].to(dtype=self.weight_dtype)
         else:
             raise ValueError(f"Unknown encoder type: {self.hparams.model.encoder}")
 
