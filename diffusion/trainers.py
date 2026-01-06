@@ -112,17 +112,17 @@ class Trainer(ABC):
             input_ids = batch["input_ids"]
             attention_mask = batch["attention_mask"].to(self.accelerator.device)
 
-            llm_attention_mask = update_self_attention_mask(
-                attention_mask, 0, False, self.accelerator.device, 
-                self.weight_dtype
-            )
+            #llm_attention_mask = update_self_attention_mask(
+            #    attention_mask, 0, False, self.accelerator.device, 
+            #    self.weight_dtype
+            #)
 
             position_ids = torch.arange(input_ids.shape[1], device=self.accelerator.device).unsqueeze(0)
 
             with torch.no_grad():
                 llm_output = self.llm(
                     input_ids.to(self.accelerator.device),
-                    llm_attention_mask,
+                    attention_mask.to(self.accelerator.device),
                     position_ids,
                     use_cache=False,
                     output_hidden_states=True,
@@ -261,13 +261,13 @@ class Trainer(ABC):
         bsz = input_ids.shape[0]
 
         # 使用预计算的 position_ids 和 attention_mask
-        position_ids = self._cached_position_ids.expand(bsz, -1)
-        llm_attention_mask = self._cached_llm_attn_mask.expand(bsz, -1, -1, -1)
-
+        #position_ids = self._cached_position_ids.expand(bsz, -1)
+        #llm_attention_mask = self._cached_llm_attn_mask.expand(bsz, -1, -1, -1)
+        position_ids = torch.arange(input_ids.shape[1], device=self.accelerator.device).unsqueeze(0)
         with torch.no_grad():
             llm_output = self.llm(
                 input_ids.to(self.accelerator.device),
-                llm_attention_mask,
+                attention_mask,
                 position_ids,
                 use_cache=False,
                 output_hidden_states=True,

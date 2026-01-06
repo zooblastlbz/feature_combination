@@ -254,9 +254,17 @@ class DiT(PreTrainedModel):
             pos_embed_max_size=config.pos_embed_max_size,
         )
 
-        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
+        self.rotary_emb = GemmaRotaryEmbedding(
+            config.base_config.head_dim,
+            config.base_config.max_position_embeddings,
+            config.base_config.rope_theta,
+        )
         if config.pos_embed == "2d-rope":
-            raise NotImplementedError("2d-rope is not implemented yet.")
+            self.rotary_emb_half_module = GemmaRotaryEmbedding(
+                config.base_config.head_dim // 2,
+                config.base_config.max_position_embeddings,
+                config.base_config.rope_theta,
+            )
         
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -298,6 +306,18 @@ class DiT(PreTrainedModel):
         self.gradient_checkpointing = False
 
         self.initialize_weights()
+
+    def rotary_emb_half(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+        """
+        Compute RoPE embeddings for half of the rotary dimension (used in 2d-rope).
+        """
+        return self.rotary_emb_half_module(hidden_states, position_ids)
+
+    def rotary_emb_half(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+        """
+        Compute RoPE embeddings for half of the rotary dimension (used in 2d-rope).
+        """
+        return self.rotary_emb_half_module(hidden_states, position_ids)
 
     def prepare_hidden_states(self, hidden_states: torch.FloatTensor, temb: torch.FloatTensor, height: int, width: int):
         if not self.config.pos_embed == "ape":
@@ -486,7 +506,17 @@ class MMDiT(PreTrainedModel):
             pos_embed_max_size=config.pos_embed_max_size,
         )
 
-        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
+        self.rotary_emb = GemmaRotaryEmbedding(
+            config.base_config.head_dim,
+            config.base_config.max_position_embeddings,
+            config.base_config.rope_theta,
+        )
+        if config.pos_embed == "2d-rope":
+            self.rotary_emb_half_module = GemmaRotaryEmbedding(
+                config.base_config.head_dim // 2,
+                config.base_config.max_position_embeddings,
+                config.base_config.rope_theta,
+            )
 
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -740,6 +770,12 @@ class MMDiT(PreTrainedModel):
     def trainable_parameters(self):
         return filter(lambda p: p.requires_grad, self.parameters())
 
+    def rotary_emb_half(self, hidden_states: torch.Tensor, position_ids: torch.Tensor):
+        """
+        Compute RoPE embeddings for half of the rotary dimension (used in 2d-rope).
+        """
+        return self.rotary_emb_half_module(hidden_states, position_ids)
+
 
 class AdaFuseDiT(PreTrainedModel):
     """
@@ -779,9 +815,17 @@ class AdaFuseDiT(PreTrainedModel):
         )
 
 
-        self.rotary_emb = GemmaRotaryEmbedding(config.base_config)
+        self.rotary_emb = GemmaRotaryEmbedding(
+            config.base_config.head_dim,
+            config.base_config.max_position_embeddings,
+            config.base_config.rope_theta,
+        )
         if config.pos_embed == "2d-rope":
-            raise NotImplementedError("2d-rope is not implemented yet.")
+            self.rotary_emb_half_module = GemmaRotaryEmbedding(
+                config.base_config.head_dim // 2,
+                config.base_config.max_position_embeddings,
+                config.base_config.rope_theta,
+            )
         
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
