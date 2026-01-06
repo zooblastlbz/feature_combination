@@ -1,0 +1,71 @@
+pipeline:
+  model_type: "adafusedit"
+  ckpt_path:
+    - "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-LNzero/checkpoint-500000"
+  dtype: "bf16"
+  use_ema: false
+
+gen:
+  metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/t2v_metrics/datasets/GenAI-Image-1600/genai_image.json"
+  batch_size: 16
+  n_samples: 1
+  seed: 42
+  H: 256
+  W: 256
+  scale: 7.5  # 保持高段的指导值，具体以 guidance_schedule 为准
+  steps: 50
+  negative_prompt: "ugly, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face"
+  instruction: "Describe this image."
+
+  # 分段 CFG：前 10 步 1.0（相当于关闭），中间 20 步 7.5，最后 20 步 3.0
+  guidance_schedule:
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 1.0
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 7.5
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
+    - 3.0
