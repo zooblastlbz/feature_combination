@@ -307,6 +307,7 @@ class DiTLayer(nn.Module):
                 self.post_cross_attention_layernorm = RMSNorm(config.dit_hidden_size, eps=config.base_config.rms_norm_eps)
         mlp_config = deepcopy(config.base_config)
         mlp_config.hidden_size = config.dit_hidden_size
+        mlp_config.intermediate_size = config.dit_hidden_size * 4
         self.mlp = GemmaMLP(mlp_config)
 
     def forward(

@@ -82,9 +82,19 @@ class Trainer(ABC):
                     name=self.hparams.trainer.run,
                     config=OmegaConf.to_container(self.hparams, resolve=True)
                 )
+                # 记录参数规模，便于后续对齐配置
+                if hasattr(self, "_param_stats"):
+                    wandb.log(self._param_stats, step=self.global_step)
             print("***** Running training *****")
             print(f"  Total train batch size = {self.total_batch_size}")
             print(f"  Total optimization steps = {self.hparams.trainer.max_steps}")
+            if hasattr(self, "_param_stats"):
+                print(
+                    f"  Parameters: total={self._param_stats['params/total']:,} "
+                    f"({self._param_stats['params/total_m']:.2f}M), "
+                    f"trainable={self._param_stats['params/trainable']:,} "
+                    f"({self._param_stats['params/trainable_m']:.2f}M)"
+                )
             self.progress_bar = tqdm(total=self.hparams.trainer.max_steps, initial=self.global_step)
 
     @abstractmethod
@@ -406,7 +416,7 @@ class Trainer(ABC):
                     with ProfileTimer("Backward", profile_stats, do_profile):
                         self.backward(loss)
                     with ProfileTimer("Optim", profile_stats, do_profile):
-                        self.optimizer_step()
+                        grad_norm=self.optimizer_step()
 
                 if do_profile:
                     sync_status = "Sync" if self.accelerator.sync_gradients else "NoSync"
@@ -417,11 +427,16 @@ class Trainer(ABC):
                     self.global_step += 1
 
                     if self.global_step % self.hparams.trainer.logging_steps == 0:
-                        self.log({
+                        log_data = {
                             "train/loss": loss.detach().item(), 
                             "train/lr": self.lr_scheduler.get_last_lr()[0],
                             "train/epoch": epoch,
-                        })
+                            "train/grad_norm": grad_norm,
+                        }
+                        if do_profile and len(profile_stats) > 0:
+                            for k, v in profile_stats.items():
+                                log_data[f"profile/{k.lower()}"] = v
+                        self.log(log_data)
                     elif self.accelerator.is_main_process:
                         self.progress_bar.update(1)
 
@@ -495,7 +510,16 @@ class AccelerateTrainer(Trainer):
             print(f"📦 构建模型...")
         self.model = build_model(hparams)
         self.model.train()
-        
+        # 统计参数量，供日志和 wandb 记录
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self._param_stats = {
+            "params/total": total_params,
+            "params/trainable": trainable_params,
+            "params/total_m": total_params / 1e6,
+            "params/trainable_m": trainable_params / 1e6,
+        }
+        print(f"  - 参数规模: total={total_params:,} ({total_params / 1e6:.2f}M), trainable={trainable_params:,} ({trainable_params / 1e6:.2f}M)")
         if hparams.trainer.enable_gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
@@ -702,7 +726,7 @@ class AccelerateTrainer(Trainer):
     def optimizer_step(self):
         """优化器更新"""
         if self.accelerator.sync_gradients:
-            self.accelerator.clip_grad_norm_(
+            grad_norm=self.accelerator.clip_grad_norm_(
                 self.model.parameters(), 
                 self.hparams.trainer.gradient_clipping
             )
@@ -710,6 +734,7 @@ class AccelerateTrainer(Trainer):
         self.optimizer.step()
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
+        return grad_norm.item() if grad_norm is not None else None
 
 
 def get_trainer(hparams):
