@@ -1,10 +1,10 @@
 pipeline:
   model_type: "adafusedit"
-  ckpt_path: ["/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-LNzero/checkpoint-500000"]
+  ckpt_path: ["/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-AdaFuseDiT-timewise-layerwise-4b/checkpoint-500000"]
   dtype: "bf16"
   use_ema: false
 gen:
-  metadata_file: "/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/t2v_metrics/datasets/GenAI-Image-1600/genai_image.json" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl
+  metadata_file: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/evaluation/genaibench_meta.json" # obtained via https://github.com/djghosh13/geneval/blob/main/prompts/evaluation_metadata.jsonl
   batch_size: 16
   n_samples: 1
   seed: 42
@@ -12,5 +12,5 @@ gen:
   W: 256
   scale: 6.0
   steps: 50
-  negative_prompt: "ugly, tiling, poorly drawn hands, poorly drawn feet, poorly drawn face, out of frame, extra limbs, disfigured, deformed, body out of frame, bad anatomy, watermark, signature, cut off, low contrast, underexposed, overexposed, bad art, beginner, amateur, distorted face"
+  negative_prompt: ""
   instruction: "Describe this image."
