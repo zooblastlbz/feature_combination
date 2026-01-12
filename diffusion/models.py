@@ -3,7 +3,7 @@ import math
 from typing import Optional
 from copy import deepcopy
 
-from cv2 import norm
+
 from diffusers.models.embeddings import PatchEmbed, Timesteps
 from diffusers.utils import is_torch_xla_available
 from einops import rearrange, repeat
@@ -268,12 +268,11 @@ class DiT(PreTrainedModel):
         rope_cfg = _make_rope_config(config.base_config, use_base_rope=(config.model_type == "FuseDiT"))
         self.rotary_emb = GemmaRotaryEmbedding(rope_cfg)
         if config.pos_embed == "2d-rope":
-            self.rotary_emb_half_module = GemmaRotaryEmbedding(rope_cfg)
-        if config.pos_embed == "2d-rope":
-            gemma_config.head_dim = gemma_config.head_dim // 2
-            self.rotary_emb_half_module = GemmaRotaryEmbedding(
-                gemma_config
-            )
+            rope_half_cfg = deepcopy(rope_cfg)
+            if hasattr(rope_half_cfg, "head_dim"):
+                rope_half_cfg.head_dim = rope_half_cfg.head_dim // 2
+            self.rotary_emb_half_module = GemmaRotaryEmbedding(rope_half_cfg)
+
         
         if config.timestep_conditioning is not None:
             self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -527,7 +526,10 @@ class MMDiT(PreTrainedModel):
         rope_cfg = _make_rope_config(config.base_config, use_base_rope=(config.model_type == "FuseDiT"))
         self.rotary_emb = GemmaRotaryEmbedding(rope_cfg)
         if config.pos_embed == "2d-rope":
-            self.rotary_emb_half_module = GemmaRotaryEmbedding(rope_cfg)
+            rope_half_cfg = deepcopy(rope_cfg)
+            if hasattr(rope_half_cfg, "head_dim"):
+                rope_half_cfg.head_dim = rope_half_cfg.head_dim // 2
+            self.rotary_emb_half_module = GemmaRotaryEmbedding(rope_half_cfg)
         
 
         if config.timestep_conditioning is not None:
@@ -1054,7 +1056,7 @@ class FuseDiT(PreTrainedModel):
 
         return dit_hidden_states, llm_hidden_states
     
-    from transformers import  modeling_qwen3_vl
+
     def prepare_hidden_states(
         self,
         llm_hidden_states: torch.FloatTensor,
@@ -1099,8 +1101,14 @@ class FuseDiT(PreTrainedModel):
                     pos_embed = (cos, sin)
 
                 elif self.config.pos_embed == "2d-rope":
-                    h_cos, h_sin = self.dit.rotary_emb_half(torch.cat([llm_hidden_states, dit_hidden_states], dim=1), h_position_ids)
-                    w_cos, w_sin = self.dit.rotary_emb_half(torch.cat([llm_hidden_states, dit_hidden_states], dim=1), w_position_ids)
+                    # 使用图像 token 的长度，特征维度固定为 head_dim，确保 cos/sin 维度与 LLM 匹配
+                    rope_hidden = llm_hidden_states.new_zeros(
+                        dit_hidden_states.shape[0],
+                        dit_hidden_states.shape[1],
+                        self.config.base_config.head_dim,
+                    )
+                    h_cos, h_sin = self.dit.rotary_emb_half(rope_hidden, h_position_ids)
+                    w_cos, w_sin = self.dit.rotary_emb_half(rope_hidden, w_position_ids)
                     cos = torch.stack([h_cos, w_cos], dim=2)
                     cos = torch.cat([rearrange(m, "b s n d -> b s (n d)") for m in cos.chunk(2, dim=-1)], dim=-1)
                     sin = torch.stack([h_sin, w_sin], dim=2)
@@ -1209,21 +1217,37 @@ class FuseDiT(PreTrainedModel):
 
         for layer_index in range(self.config.initial_layers):
             if self.gradient_checkpointing and self.training:
+                llm_pos_ids = repeat(
+                    torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device),
+                    "s -> b s",
+                    b=llm_hidden_states.shape[0],
+                )
+                llm_pos_embed = self.dit.rotary_emb(llm_hidden_states, llm_pos_ids)
                 llm_hidden_states = self._gradient_checkpointing_func(
                     self.llm.layers[layer_index].__call__,
-                    llm_hidden_states,
-                    self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
-                    repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
-                )[0]
+                    hidden_states=llm_hidden_states,
+                    position_embeddings=llm_pos_embed,
+                    attention_mask=self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                    position_ids=llm_pos_ids,
+                )  # type: ignore
 
             else:
+                llm_pos_ids = repeat(
+                    torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device),
+                    "s -> b s",
+                    b=llm_hidden_states.shape[0],
+                )
+                llm_pos_embed = self.dit.rotary_emb(llm_hidden_states, llm_pos_ids)
+                #print(f"llm_pos_embed shape: {llm_pos_embed[0].shape}")
+                #print(f"llm_hidden_states shape before layer {layer_index}: {llm_hidden_states.shape}")
                 llm_hidden_states = self.llm.layers[layer_index](
-                    llm_hidden_states,
-                    self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
-                    repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
-                )[0]
+                    hidden_states=llm_hidden_states,
+                    position_embeddings=llm_pos_embed,
+                    attention_mask=self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                    position_ids=llm_pos_ids,
+                )
 
-        for layer_index in range(self.config.initial_layers, self.config.base_config.num_hidden_layers):
+        for layer_index in range(self.config.initial_layers, self.config.dit_num_hidden_layers+self.config.initial_layers):
             if self.gradient_checkpointing and self.training:
                 if self.config.shared_attention_layers == "all" or layer_index in self.config.shared_attention_layers:
                     dit_hidden_states, llm_hidden_states = (
@@ -1246,12 +1270,19 @@ class FuseDiT(PreTrainedModel):
                         temb,
                         None if pos_embed is None else (pos_embed[0][:, llm_hidden_states.shape[1]:], pos_embed[1][:, llm_hidden_states.shape[1]:]),
                     )
+                    llm_pos_ids = repeat(
+                        torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device),
+                        "s -> b s",
+                        b=llm_hidden_states.shape[0],
+                    )
+                    llm_pos_embed = self.dit.rotary_emb(llm_hidden_states, llm_pos_ids)
                     llm_hidden_states = self._gradient_checkpointing_func(
                         self.llm.layers[layer_index].__call__,
-                        llm_hidden_states,
-                        self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
-                        repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
-                    )[0]
+                        hidden_states=llm_hidden_states,
+                        position_embeddings=llm_pos_embed,
+                        attention_mask=self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                        position_ids=llm_pos_ids,
+                    ) 
 
             else:
                 if self.config.shared_attention_layers == "all" or layer_index in self.config.shared_attention_layers:
@@ -1271,11 +1302,18 @@ class FuseDiT(PreTrainedModel):
                         temb,
                         None if pos_embed is None else (pos_embed[0][:, llm_hidden_states.shape[1]:], pos_embed[1][:, llm_hidden_states.shape[1]:]),
                     )
+                    llm_pos_ids = repeat(
+                        torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device),
+                        "s -> b s",
+                        b=llm_hidden_states.shape[0],
+                    )
+                    llm_pos_embed = self.dit.rotary_emb(llm_hidden_states, llm_pos_ids)
                     llm_hidden_states = self.llm.layers[layer_index](
-                        llm_hidden_states,
-                        self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
-                        repeat(torch.arange(llm_hidden_states.shape[1], device=llm_hidden_states.device), "s -> b s", b=llm_hidden_states.shape[0])
-                    )[0]
+                        hidden_states=llm_hidden_states,
+                        position_embeddings=llm_pos_embed,
+                        attention_mask=self_attention_mask[:, :, :llm_hidden_states.shape[1], :llm_hidden_states.shape[1]],
+                        position_ids=llm_pos_ids,
+                    )
 
         for layer_index in range(self.config.base_config.num_hidden_layers - self.config.initial_layers, self.config.dit_num_hidden_layers):
             if self.gradient_checkpointing and self.training:
@@ -1486,7 +1524,7 @@ class AdaFuseDiT(PreTrainedModel):
         #for i, h in enumerate(text_hidden_states):
         #    if torch.isnan(h).any():
         #        print(f"❌ NaN detected in text_hidden_states[{i}], shape={h.shape}")
-        
+       
         if self.config.use_layer_wise_fusion:
             if self.config.use_timestep_adaptive_fusion:
                 normalized_timestep = timestep.float() / 1000.0
@@ -1657,6 +1695,8 @@ class AdaFuseDiT(PreTrainedModel):
                 text_hidden_states,
                 timestep
             )
+            dtype = fused_text.dtype
+            fused_text = self.context_embedder(fused_text).to(dtype)
             #if torch.isnan(fused_text).any():
             #    raise ValueError("Fused text features contain NaN values.")
             
@@ -1672,8 +1712,8 @@ class AdaFuseDiT(PreTrainedModel):
                 #    raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
             # 映射到 DiT 的隐藏维度
             # Force float32 for context_embedder
-            dtype = fused_text.dtype
-            fused_text = self.context_embedder(fused_text).to(dtype)
+                dtype = fused_text.dtype
+                fused_text = self.context_embedder(fused_text).to(dtype)
             
             # 执行 DiT 层
             if self.gradient_checkpointing and self.training:
@@ -1866,6 +1906,50 @@ def build_adafusedit(hparams):
     transformer.requires_grad_(hparams.trainer.train_dit)
     
     return transformer
+
+
+def build_fusedit(hparams):
+    base_config = AutoConfig.from_pretrained(hparams.model.base)
+    load_model = get_llm(hparams.model.base, base_config)
+    base_config = load_model.config
+    base_config = _patch_base_config_defaults(base_config)
+
+    assert hparams.model.attention in ["self", "cross"]
+    assert hparams.model.pos_embed in ["ape", "1d-rope", "2d-rope", "m-rope"]
+    assert hparams.model.timestep_conditioning in [None, "adaln-zero", "adaln-single", "addition"]
+
+    if not hasattr(base_config, "head_dim"):
+        base_config.head_dim = base_config.hidden_size // base_config.num_attention_heads
+    #base_config.num_hidden_layers = min(
+    #    base_config.num_hidden_layers,
+    #    max(hparams.model.shared_attention_layers) + 1 if hparams.model.shared_attention_layers != "all" else base_config.num_hidden_layers,
+    #)
+
+    config = FuseDiTConfig(
+        attention=hparams.model.attention,
+        base_config=base_config,
+        dit_hidden_size=hparams.model.dit_hidden_size if hasattr(hparams.model, "dit_hidden_size") else base_config.hidden_size,
+        dit_num_hidden_layers=hparams.model.dit_num_hidden_layers,
+        initial_layers=hparams.model.initial_layers if hasattr(hparams.model, "initial_layers") else 0,
+        patch_size=hparams.model.patch_size,
+        pos_embed=hparams.model.pos_embed,
+        qk_norm=hparams.model.qk_norm,
+        sandwich_norm=hparams.model.sandwich_norm,
+        shared_attention_layers=hparams.model.shared_attention_layers,
+        text_hidden_size=base_config.hidden_size,
+        text_modulation_embeds_dim=hparams.model.text_modulation_embeds_dim if hasattr(hparams.model, "text_modulation_embeds_dim") else None,
+        timestep_conditioning=hparams.model.timestep_conditioning,
+    )
+    transformer = FuseDiT(config)
+
+    transformer.llm.load_state_dict(load_model.state_dict(), strict=False)
+    del load_model
+
+    transformer.dit.requires_grad_(hparams.trainer.train_dit)
+    transformer.llm.requires_grad_(hparams.trainer.train_llm)
+
+    return transformer
+
 
 
 def build_model(hparams):

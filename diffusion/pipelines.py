@@ -266,7 +266,6 @@ class FuseDiTPipeline(DiffusionPipeline, FromSingleFileMixin):
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-
                 noise_pred, past_key_values = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep,

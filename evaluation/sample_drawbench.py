@@ -52,15 +52,14 @@ def generate(opt):
     
     with distributed_state.split_between_processes(prompts) as samples:
         for model in tqdm(opt.pipeline.ckpt_path):
-            output_dir=os.path.join(model, f"genaibench-{int(opt.gen.scale)}-{int(opt.gen.steps)}")
+            output_dir=os.path.join(model, f"draw-{int(opt.gen.scale)}-{int(opt.gen.steps)}")
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
             pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
             for index in tqdm(len(samples)):
-                sample = samples[index]
                 
-                id=sample['id']
-                prompt = sample['prompt']
+                sample = samples[index]
+                prompt = sample['caption']
                 generator = torch.manual_seed(opt.gen.seed)
                 with torch.autocast("cuda", dtype=torch_dtype):
                     images = pipe(
@@ -76,8 +75,9 @@ def generate(opt):
                     )[0]
                 
                 
+
                 for i, image in enumerate(images):
-                    image.save(os.path.join(output_dir, f"{id}_sample_{i}.png"))
+                    image.save(os.path.join(output_dir, f"{index}_sample_{i}.png"))
 
 
 def main(config_file):

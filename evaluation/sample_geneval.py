@@ -58,7 +58,7 @@ def generate(opt):
                 if opt.pipeline.use_ema:
                     outpath = os.path.join(model,  f"geneval-ema-{int(opt.gen.scale)}", f"{index:0>5}")
                 else:
-                    outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}", f"{index:0>5}")
+                    outpath = os.path.join(model, f"geneval-{int(opt.gen.scale)}-{int(opt.gen.steps)}", f"{index:0>5}")
                 os.makedirs(outpath, exist_ok=True)
 
                 prompt = metadata['prompt']
