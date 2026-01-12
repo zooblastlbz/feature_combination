@@ -1,6 +1,6 @@
 trainer:
   cache_dir: "../.cache/torch_xla"
-  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-fusedit-baseline"
+  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-fusedit-baseline-4b"
   checkpointing_steps: 5000
   consolidation_steps: 50000
   enable_gradient_checkpointing: false
@@ -14,7 +14,7 @@ trainer:
   mixed_precision: "bf16"
   mode_scale: 1.29
   precondition_outputs: false
-  project: "FuseDiT"
+  project: "AdaFuseDiT"
   resume_from: "latest"
   run: "256-fusedit-baseline"
   seed: 42
@@ -25,16 +25,18 @@ trainer:
 model:
   attention: "self"
   base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/"
-  dit_num_hidden_layers: 18
+  dit_num_hidden_layers: 24
   encoder_type: "llm"
+  initial_layers: 6
   name: "FuseDiT"
   patch_size: 2
-  pos_embed: "1d-rope"
+  pos_embed: "2d-rope"
   qk_norm: true
   sandwich_norm: false
-  timestep_conditioning: "adaln-zero"
-  shared_attention_layers: "even"
-  text_hidden_states_num: 36
+  timestep_conditioning: null
+  shared_attention_layers: [6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29]
+  dit_hidden_size: 2048
+  text_hidden_size: 2560
 
 ema:
   decay: 0.99
