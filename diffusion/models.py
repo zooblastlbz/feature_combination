@@ -390,8 +390,21 @@ class DiT(PreTrainedModel):
 
         hidden_states, pos_embed = self.prepare_hidden_states(hidden_states, temb, height, width)
         
-        # Force float32 for context_embedder (which contains Norm)
+        # 处理文本特征：可选的归一化均值融合（无可训练权重），仅在传入多层特征且 use_norm_avg_fusion=True 时启用
         if text_hidden_states is not None:
+            if isinstance(text_hidden_states, (list, tuple)):
+                if self.config.use_norm_avg_fusion:
+                    hidden_size = self.config.text_hidden_size or text_hidden_states[0].shape[-1]
+                    normalized_hidden_states = [
+                        F.layer_norm(h.float(), normalized_shape=(hidden_size,)) for h in text_hidden_states
+                    ]
+                    text_hidden_states = torch.mean(torch.stack(normalized_hidden_states, dim=0), dim=0)
+                else:
+                    raise ValueError(
+                        "DiT received multiple text_hidden_states but use_norm_avg_fusion is False; "
+                        "please enable use_norm_avg_fusion or pass a single tensor."
+                    )
+            # Force float32 for context_embedder (which contains Norm)
             dtype = text_hidden_states.dtype
             text_hidden_states = F.layer_norm(text_hidden_states, [text_hidden_states.shape[-1]])
             text_hidden_states = self.context_embedder(text_hidden_states).to(dtype)
