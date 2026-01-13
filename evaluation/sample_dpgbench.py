@@ -47,7 +47,7 @@ def generate(opt):
         for model in tqdm(opt.pipeline.ckpt_path):
             os.makedirs(os.path.join(model, f"dpgbench-{int(opt.gen.scale)}"), exist_ok=True)
             pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
-            for sample in tqdm(samples):
+            for sample in tqdm(range(len(samples))):
                 prompt = open(os.path.join(opt.gen.prompts_dir, sample)).read()
 
                 generator = torch.manual_seed(opt.gen.seed)

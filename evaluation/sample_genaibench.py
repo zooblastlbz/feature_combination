@@ -56,7 +56,7 @@ def generate(opt):
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
             pipe = load_pipeline(opt.pipeline.model_type, os.path.join(model, "pipeline"), torch_dtype)
-            for index in tqdm(len(samples)):
+            for index in tqdm(range(len(samples))):
                 sample = samples[index]
                 
                 id=sample['id']
