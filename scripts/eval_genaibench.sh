@@ -11,14 +11,15 @@ OUTPUT_BASE_DIR="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination
 EXPERIMENT_NAME="256-baseline-norm"
 CHECKPOINT_STEP="500000"
 GENAIBENCH_SCALE="6"   # 与生成时的 scale 保持一致，决定子目录名
+STEPS="50"              # 与生成时的步数保持一致，决定子目录名
 
 IMAGE_DIR=${OUTPUT_BASE_DIR}
-RESULT_DIR=${OUTPUT_BASE_DIR}/${EXPERIMENT_NAME}/checkpoint-${CHECKPOINT_STEP}/genaibench-${GENAIBENCH_SCALE}-eval
+RESULT_DIR=${OUTPUT_BASE_DIR}/${EXPERIMENT_NAME}/checkpoint-${CHECKPOINT_STEP}/genaibench-${GENAIBENCH_SCALE}-${STEPS}-eval
 NUM_THREADS=20
 NUM_IMAGES_PER_PROMPT=1
 
 # === 构造路径 ===
-GEN_MODEL=${EXPERIMENT_NAME}/checkpoint-${CHECKPOINT_STEP}/genaibench-${GENAIBENCH_SCALE}
+GEN_MODEL=${EXPERIMENT_NAME}/checkpoint-${CHECKPOINT_STEP}/genaibench-${GENAIBENCH_SCALE}-${STEPS}
 # === 评估输出配置 ===
 # 确保结果目录存在
 mkdir -p "$RESULT_DIR"

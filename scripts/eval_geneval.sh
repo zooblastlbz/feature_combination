@@ -7,11 +7,13 @@ MODEL_EVAL_DIR="/ytech_m2v5_hdd/workspace/kling_mm/libozhou/text_encoder/geneval
 OUTPUT_BASE_DIR="/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output"
 EXPERIMENT_NAME="256-AdaFuseDiT-timewise-LNzero"
 CHECKPOINT_STEP="100000"
+SCALES="6"  # 与生成时的 scale 保持一致，决定子目录名
+STEPS="50"   # 与生成时的步数保持一致，决定子目录名
 
 # Construct the full paths using the variables
 CHECKPOINT_DIR="$OUTPUT_BASE_DIR/$EXPERIMENT_NAME/checkpoint-$CHECKPOINT_STEP"
-INPUT_GENEVAL_DIR="$CHECKPOINT_DIR/geneval-6"
-OUTPUT_JSON_FILE="$CHECKPOINT_DIR/geneval.json"
+INPUT_GENEVAL_DIR="$CHECKPOINT_DIR/geneval-$SCALES-$STEPS"
+OUTPUT_JSON_FILE="$CHECKPOINT_DIR/geneval-$SCALES-$STEPS-eval.json"
 
 # --- Execute the commands ---
 
