@@ -36,6 +36,7 @@ class DiTConfig(PretrainedConfig):
         use_timestep_adaptive_fusion: bool = False,
         use_layer_wise_fusion: bool = False,
         adaptive_fusion_time_embed_dim: int = 128,
+        use_norm_avg_fusion: bool = False,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -72,12 +73,14 @@ class DiTConfig(PretrainedConfig):
         self.text_hidden_size = text_hidden_size
         self.text_modulation_embeds_dim = text_modulation_embeds_dim
         self.timestep_conditioning = timestep_conditioning
+        self.use_norm_avg_fusion=use_norm_avg_fusion
         
         # AdaFuseDiT 配置参数
         self.text_hidden_states_num = text_hidden_states_num
         self.use_timestep_adaptive_fusion = use_timestep_adaptive_fusion
         self.use_layer_wise_fusion = use_layer_wise_fusion
         self.adaptive_fusion_time_embed_dim = adaptive_fusion_time_embed_dim
+        
 
 
 class FuseDiTConfig(DiTConfig):

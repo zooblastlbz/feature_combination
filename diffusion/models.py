@@ -362,6 +362,7 @@ class DiT(PreTrainedModel):
 
         return hidden_states, pos_embed
 
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -393,19 +394,21 @@ class DiT(PreTrainedModel):
         if text_hidden_states is not None:
             if isinstance(text_hidden_states, (list, tuple)):
                 if self.config.use_norm_avg_fusion:
+                    dtype = text_hidden_states[0].dtype
                     hidden_size = self.config.text_hidden_size or text_hidden_states[0].shape[-1]
                     normalized_hidden_states = [
                         F.layer_norm(h.float(), normalized_shape=(hidden_size,)) for h in text_hidden_states
                     ]
-                    text_hidden_states = torch.mean(torch.stack(normalized_hidden_states, dim=0), dim=0)
+                    text_hidden_states = torch.mean(torch.stack(normalized_hidden_states, dim=0), dim=0).to(dtype)
                 else:
                     raise ValueError(
                         "DiT received multiple text_hidden_states but use_norm_avg_fusion is False; "
                         "please enable use_norm_avg_fusion or pass a single tensor."
                     )
             # Force float32 for context_embedder (which contains Norm)
-            dtype = text_hidden_states.dtype
-            text_hidden_states = F.layer_norm(text_hidden_states, [text_hidden_states.shape[-1]])
+            else:
+                dtype = text_hidden_states.dtype
+                text_hidden_states = F.layer_norm(text_hidden_states, [text_hidden_states.shape[-1]]).to(dtype)
             text_hidden_states = self.context_embedder(text_hidden_states).to(dtype)
 
         cross_attention_mask = update_cross_attention_mask(
@@ -1507,100 +1510,67 @@ class AdaFuseDiT(PreTrainedModel):
         """
         return self.rotary_emb_half_module(hidden_states, position_ids)
     def _fuse_text_features(
-        self, 
-        text_hidden_states: list, 
-        timestep: torch.Tensor, 
-        layer_idx: Optional[int] = None
+        self,
+        text_hidden_states: Optional[list],
+        timestep: torch.Tensor,
     ):
         """
-        统一的文本特征融合接口。
+        向量化的文本特征融合。
+        返回：
+        - fused_text_global: 全局融合后的特征（非 layer-wise 模式）
+        - fused_text_per_layer: 每层独立融合后的特征列表（layer-wise 模式）
         """
-        if self.config.text_hidden_states_num == 1:
-            return text_hidden_states[0] if isinstance(text_hidden_states, list) else text_hidden_states
-        
-        dtype = text_hidden_states[0].dtype
-        
-        # 检查输入是否有 NaN
-        #for i, h in enumerate(text_hidden_states):
-        #    if torch.isnan(h).any():
-        #        print(f"❌ NaN detected in text_hidden_states[{i}], shape={h.shape}")
-       
-        if self.config.use_layer_wise_fusion:
-            if self.config.use_timestep_adaptive_fusion:
-                normalized_timestep = timestep.float() / 1000.0
-                #if torch.isnan(normalized_timestep).any():
-                #    print(f"❌ NaN detected in normalized_timestep")
-                
-                fused_text, weights = self.text_fusion_modules[layer_idx](
-                    text_hidden_states,
-                    normalized_timestep
-                )
-                
-                #if torch.isnan(weights).any():
-                #    print(f"❌ NaN detected in weights (mode 4), layer_idx={layer_idx}")
-                #if torch.isnan(fused_text).any():
-                #    print(f"❌ NaN detected in fused_text (mode 4), layer_idx={layer_idx}")
-            else:
-                normalized_hidden_states = [
-                    F.layer_norm(h.float(), normalized_shape=(self.config.text_hidden_size,))
-                    for h in text_hidden_states
-                ]
-                
-                #for i, nh in enumerate(normalized_hidden_states):
-                #    if torch.isnan(nh).any():
-                #        print(f"❌ NaN detected after layer_norm[{i}] (mode 3)")
-                
-                weights = F.softmax(self.text_fusion_weights[layer_idx].float(), dim=0)
-                #if torch.isnan(weights).any():
-                #    print(f"❌ NaN detected in weights (mode 3), values={self.text_fusion_weights[layer_idx]}")
-                
-                stacked = torch.stack(normalized_hidden_states, dim=0)
-                fused_text = torch.sum(
-                    stacked * weights.view(-1, 1, 1, 1),
-                    dim=0
-                ).to(dtype)
-                
-                #if torch.isnan(fused_text).any():
-                #    print(f"❌ NaN detected in fused_text (mode 3)")
+        if text_hidden_states is None:
+            return None, None
+
+        if isinstance(text_hidden_states, (list, tuple)):
+            stacked = torch.stack(text_hidden_states, dim=0).float()  # (L, B, S, C)
+            text_dtype = text_hidden_states[0].dtype
         else:
+            stacked = text_hidden_states.unsqueeze(0).float()  # (1, B, S, C)
+            text_dtype = text_hidden_states.dtype
+
+        stacked = F.layer_norm(stacked, (stacked.shape[-1],))
+
+        fused_text_global = None
+        fused_text_per_layer = None
+
+        if not self.config.use_layer_wise_fusion:
             if self.config.use_timestep_adaptive_fusion:
                 normalized_timestep = timestep.float() / 1000.0
-                #if torch.isnan(normalized_timestep).any():
-                #    print(f"❌ NaN detected in normalized_timestep")
-                
-                fused_text, weights = self.text_fusion_module(
-                    text_hidden_states,
-                    normalized_timestep
-                )
-                
-                #if torch.isnan(weights).any():
-                #    print(f"❌ NaN detected in weights (mode 2)")
-                #if torch.isnan(fused_text).any():
-                #    print(f"❌ NaN detected in fused_text (mode 2)")
+                t_embed = self.text_fusion_module._time_embedding(normalized_timestep)
+                weight_logits = self.text_fusion_module.weight_generator(t_embed.to(dtype=stacked.dtype))
+                weights = F.softmax(weight_logits, dim=-1)  # (b, L)
+                fused_text_global = torch.einsum("bl,lbsc->bsc", weights, stacked)
             else:
-                normalized_hidden_states = [
-                    F.layer_norm(h.float(), normalized_shape=(self.config.text_hidden_size,))
-                    for h in text_hidden_states
-                ]
-                
-                #for i, nh in enumerate(normalized_hidden_states):
-                #    if torch.isnan(nh).any():
-                #        print(f"❌ NaN detected after layer_norm[{i}] (mode 1)")
-                
-                weights = F.softmax(self.text_fusion_weight.float(), dim=0)
-                #if torch.isnan(weights).any():
-                #    print(f"❌ NaN detected in weights (mode 1), values={self.text_fusion_weight}")
-                
-                stacked = torch.stack(normalized_hidden_states, dim=0)
-                fused_text = torch.sum(
-                    stacked * weights.view(-1, 1, 1, 1),
-                    dim=0
-                ).to(dtype)
-                
-                #if torch.isnan(fused_text).any():
-                #    print(f"❌ NaN detected in fused_text (mode 1)")
-        
-        return fused_text
+                weights = F.softmax(self.text_fusion_weight.float(), dim=0)  # (L,)
+                fused_text_global = torch.einsum("l,lbsc->bsc", weights, stacked)
+
+            fused_text_global = fused_text_global.to(dtype=text_dtype)
+            fused_text_global = self.context_embedder(fused_text_global).to(fused_text_global.dtype)
+        else:
+            fused_text_per_layer = []
+            if self.config.use_timestep_adaptive_fusion:
+                normalized_timestep = timestep.float() / 1000.0
+                # 共享时间嵌入，一次性计算所有层的权重并融合
+                t_embed = self.text_fusion_modules[0]._time_embedding(normalized_timestep)
+                weight_logits = torch.stack(
+                    [module.weight_generator(t_embed.to(dtype=stacked.dtype)) for module in self.text_fusion_modules],
+                    dim=0,
+                )  # (K, B, L)
+                weights = F.softmax(weight_logits, dim=-1)
+                fused_stack = torch.einsum("kbl,lbsc->kbsc", weights, stacked)  # (K, B, S, C)
+                for layer_idx in range(self.config.dit_num_hidden_layers):
+                    fused_layer = fused_stack[layer_idx].to(dtype=text_dtype)
+                    fused_text_per_layer.append(self.context_embedder(fused_layer).to(fused_layer.dtype))
+            else:
+                weight_stack = torch.stack([F.softmax(w.float(), dim=0) for w in self.text_fusion_weights], dim=0)  # (K, L)
+                fused_stack = torch.einsum("kl,lbsc->kbsc", weight_stack, stacked)
+                for layer_idx in range(self.config.dit_num_hidden_layers):
+                    fused_layer = fused_stack[layer_idx].to(dtype=text_dtype)
+                    fused_text_per_layer.append(self.context_embedder(fused_layer).to(fused_layer.dtype))
+
+        return fused_text_global, fused_text_per_layer
     def prepare_hidden_states(self, hidden_states: torch.FloatTensor, temb: torch.FloatTensor, height: int, width: int):
         if not self.config.pos_embed == "ape":
             if self.config.timestep_conditioning == "addition":
@@ -1688,33 +1658,17 @@ class AdaFuseDiT(PreTrainedModel):
             torch.float32 if ACCEL == "xla" else hidden_states.dtype,
         )
 
-        # 每层独立融合文本特征
-        if not self.config.use_layer_wise_fusion and text_hidden_states is not None:
-            # 全局融合文本特征
-            fused_text = self._fuse_text_features(
-                text_hidden_states,
-                timestep
-            )
-            dtype = fused_text.dtype
-            fused_text = self.context_embedder(fused_text).to(dtype)
-            #if torch.isnan(fused_text).any():
-            #    raise ValueError("Fused text features contain NaN values.")
-            
+        fused_text_global, fused_text_per_layer = self._fuse_text_features(
+            text_hidden_states,
+            timestep,
+        )
+
         for layer_idx in range(self.config.dit_num_hidden_layers):
-            # 为当前层融合文本特征
-            if self.config.use_layer_wise_fusion and text_hidden_states is not None:
-                fused_text = self._fuse_text_features(
-                    text_hidden_states,
-                    timestep,
-                    layer_idx=layer_idx if self.config.use_layer_wise_fusion else None
-                )
-                #if torch.isnan(fused_text).any():
-                #    raise ValueError(f"Fused text features at layer {layer_idx} contains NaN values.")
-            # 映射到 DiT 的隐藏维度
-            # Force float32 for context_embedder
-                dtype = fused_text.dtype
-                fused_text = self.context_embedder(fused_text).to(dtype)
-            
+            if fused_text_per_layer is not None:
+                fused_text = fused_text_per_layer[layer_idx]
+            else:
+                fused_text = fused_text_global
+
             # 执行 DiT 层
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
@@ -1829,6 +1783,7 @@ def build_dit(hparams):
         text_hidden_states_index=hparams.model.text_hidden_states_index if hasattr(hparams.model, "text_hidden_states_index") else -1,
         text_modulation_embeds_dim=hparams.model.text_modulation_embeds_dim if hasattr(hparams.model, "text_modulation_embeds_dim") else None,
         timestep_conditioning=hparams.model.timestep_conditioning,
+        use_norm_avg_fusion=hparams.model.use_norm_avg_fusion if hasattr(hparams.model, "use_norm_avg_fusion") else False,
     )
     
     transformer = DiT(config)
