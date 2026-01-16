@@ -1,6 +1,6 @@
 trainer:
   cache_dir: "../.cache/torch_xla"
-  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-mmdit"
+  checkpoint_dir: "/ytech_m2v8_hdd/workspace/kling_mm/libozhou/feature_combination/output/256-mmdit-4b"
   checkpointing_steps: 5000
   consolidation_steps: 50000
   enable_gradient_checkpointing: false
@@ -16,7 +16,7 @@ trainer:
   precondition_outputs: false
   project: "AdaFuseDiT"
   resume_from: null
-  run: "mmdit"
+  run: "mmdit-4b"
   seed: 42
   weighting_scheme: "logit_normal"
   train_dit: true
@@ -27,13 +27,15 @@ model:
   base: "/ytech_m2v5_hdd/workspace/kling_mm/Models/Qwen3-VL-4B-Instruct/"
   encoder_type: "llm"
   attention: "self"
-  dit_num_hidden_layers: 18
+  dit_num_hidden_layers: 24
   patch_size: 2
   pos_embed: "1d-rope"
   qk_norm: true
   sandwich_norm: false
   text_hidden_states_index: -2   # use the penultimate LLM layer
-  timestep_conditioning: "adaln-zero"
+  timestep_conditioning: null
+  dit_hidden_size: 2048
+
 
 ema:
   decay: 0.99

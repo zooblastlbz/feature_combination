@@ -514,6 +514,9 @@ class MMDiT(PreTrainedModel):
     def __init__(self, config: MMDiTConfig):
         super().__init__(config)
 
+        # Align text_hidden_size with DiT hidden size per user requirement.
+        config.text_hidden_size = config.dit_hidden_size
+
         self.layers = nn.ModuleList([MMDiTLayer(config) for _ in range(config.dit_num_hidden_layers)])
 
         self.patch_embed = PatchEmbed(
