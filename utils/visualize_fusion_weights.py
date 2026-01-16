@@ -198,6 +198,9 @@ def visualize(args):
         print(f"Saved weights to {csv_path}")
 
     # Combined figure with one subplot per key/layer
+    plt.style.use("seaborn-v0_8-whitegrid")
+    plt.rcParams.update({"figure.dpi": 300})
+
     num_plots = len(results)
     cols = min(4, num_plots) if num_plots > 1 else 1
     rows = (num_plots + cols - 1) // cols
@@ -210,7 +213,7 @@ def visualize(args):
         x = np.arange(num_text_layers)
         for t_idx, t_val in enumerate(timesteps):
             color = cm(t_idx / (len(timesteps) - 1) if len(timesteps) > 1 else 0.5)
-            ax.plot(x, weights[t_idx], label=f"t={int(t_val)}", color=color, marker='o', markersize=3)
+            ax.plot(x, weights[t_idx], label=f"t={int(t_val)}", color=color, marker="o", markersize=3)
         ax.set_xlabel("Text Encoder Layer Index")
         ax.set_ylabel("Fusion Weight (Softmax)")
         ax.set_title(f"{key}")
@@ -224,7 +227,7 @@ def visualize(args):
 
     fig.tight_layout()
     combined_path = os.path.join(args.output_dir, "fusion_weights_layers.pdf")
-    fig.savefig(combined_path)
+    fig.savefig(combined_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved combined plot to {combined_path}")
 
