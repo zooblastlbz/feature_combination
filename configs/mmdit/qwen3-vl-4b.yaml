@@ -34,7 +34,7 @@ model:
   sandwich_norm: false
   text_hidden_states_index: -2   # use the penultimate LLM layer
   timestep_conditioning: null
-  dit_hidden_size: 2048
+  dit_hidden_size: 1536
 
 
 ema:

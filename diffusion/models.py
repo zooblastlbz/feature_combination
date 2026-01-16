@@ -567,15 +567,15 @@ class MMDiT(PreTrainedModel):
                 self.text_fusion_module = TimestepWiseFeatureWeighting(
                     num_layers=config.text_hidden_states_num,
                     time_embed_dim=config.adaptive_fusion_time_embed_dim,
-                    feature_dim=config.text_hidden_size,
+                    feature_dim=config.base_config.hidden_size,
                 )
             else:
                 # Zero init so softmax starts as uniform
                 self.text_fusion_weight = nn.Parameter(torch.zeros(config.text_hidden_states_num))
 
         self.context_embedder = nn.Sequential(
-            RMSNorm(config.text_hidden_size, eps=config.base_config.rms_norm_eps),
-            nn.Linear(config.text_hidden_size, config.dit_hidden_size),
+            RMSNorm(config.base_config.hidden_size, eps=config.base_config.rms_norm_eps),
+            nn.Linear(config.base_config.hidden_size, config.dit_hidden_size),
         )
 
         if config.timestep_conditioning == "adaln-zero":
